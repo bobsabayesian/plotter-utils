@@ -1,0 +1,16 @@
+# Linux / macOS system files
+.DS_Store
+.Thumbs.db
+.Trash-*
+
+# Python environment and cache
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+.env
+
+# General log files
+*.log
