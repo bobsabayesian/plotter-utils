@@ -2,6 +2,7 @@
 .DS_Store
 .Thumbs.db
 .Trash-*
+.ipynb_checkpoints/
 
 # Python environment and cache
 __pycache__/
