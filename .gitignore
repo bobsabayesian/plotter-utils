@@ -15,3 +15,9 @@ venv/
 
 # General log files
 *.log
+
+# Windows download markers and generated job output
+*:Zone.Identifier
+layerfile/
+jsonfiles/
+*.gcode

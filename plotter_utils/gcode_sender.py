@@ -10,6 +10,7 @@ __all__ = [
     "clean_gcode_line", "DEFAULT_BAUD",
 ]
 
+MAX_SILENT_READS = 60  # consecutive empty reads (1 s each) before giving up
 GRBL_RX_BUFFER = 127  # bytes in GRBL's serial RX buffer
 DEFAULT_BAUD = 115200
 
@@ -82,6 +83,7 @@ class GrblConnection:
 
     def __init__(self, port, baud=DEFAULT_BAUD, timeout=1.0):
         self.ser = serial.Serial(port, baud, timeout=timeout)
+        self._stopped = False
         self._wake()
 
     def __enter__(self):
@@ -138,47 +140,74 @@ class GrblConnection:
     def stop(self):
         """
         Emergency stop: feed hold, laser off, then soft reset (which clears the
-        planner buffer). Position is lost, so re-home or re-zero afterwards.
+        planner buffer). Position is lost, so re-zero afterwards. Safe to call from
+        another thread; a running send_lines() will raise GrblError.
         """
+        self._stopped = True
         self.ser.write(FEED_HOLD)
         self.ser.write(SOFT_RESET)
         time.sleep(0.5)
         self.ser.reset_input_buffer()
 
-    def send_file(self, filename, progress=True):
+    def set_zero(self):
         """
-        Streams a gcode file to the controller using GRBL character-counting, which
-        keeps the RX buffer full so motion doesn't stall between lines. Blocks until
-        every line is acknowledged. Ctrl-C / Jupyter's kernel interrupt calls stop(),
-        which turns the laser off.
+        Treats the current head position as X0 Y0 (the iDraw has no homing).
         """
-        lines = read_gcode(filename)
+        return self.command("G92 X0 Y0")
+
+    def pen_up(self, z=0):
+        return self.command(f"G00 Z{z:g}")
+
+    def pen_down(self, z=6):
+        return self.command(f"G00 Z{z:g}")
+
+    def send_lines(self, lines, buffered=True, on_progress=None):
+        """
+        Sends G-code lines and blocks until every one is acknowledged.
+
+        buffered=True streams with GRBL character-counting, keeping the controller's
+        RX buffer full so motion doesn't stall. buffered=False sends one line at a
+        time and waits for 'ok' -- slower, but the safest choice on firmware that
+        doesn't behave like stock GRBL. on_progress(done, total) is called as lines
+        are acknowledged. KeyboardInterrupt (Jupyter's kernel interrupt) calls stop().
+        """
+        lines = [l for l in (clean_gcode_line(l) for l in lines) if l]
         total = len(lines)
+        self._stopped = False
         pending = deque()  # byte length of each line sent but not yet acknowledged
-        sent = acked = 0
+        sent = acked = silent = 0
 
         try:
             while acked < total:
-                # Fill the controller's buffer as far as it will go
-                while sent < total and sum(pending) + len(lines[sent]) + 1 < GRBL_RX_BUFFER:
+                if self._stopped:
+                    raise GrblError("Stopped")
+                # Fill the controller's buffer; unbuffered sends one line at a time
+                while sent < total and (buffered or not pending) and sum(pending) + len(lines[sent]) + 1 < GRBL_RX_BUFFER:
                     self.ser.write((lines[sent] + "\n").encode())
                     pending.append(len(lines[sent]) + 1)
                     sent += 1
 
                 resp = self.ser.readline().decode(errors="replace").strip()
                 if resp == "ok":
+                    silent = 0
                     pending.popleft()
                     acked += 1
-                    if progress and (acked % 100 == 0 or acked == total):
-                        print(f"\r{acked}/{total} lines", end="", flush=True)
+                    if on_progress:
+                        on_progress(acked, total)
                 elif resp.startswith(("error", "ALARM")):
                     self.stop()
                     raise GrblError(f"{resp} at line {acked + 1}: {lines[acked]!r}")
-                elif not resp and not pending:
-                    break
+                elif not resp:
+                    # Long moves legitimately go quiet; give up only after a long silence
+                    silent += 1
+                    if silent > MAX_SILENT_READS:
+                        raise GrblError(f"No response from controller at line {acked + 1}: {lines[acked]!r}")
         except KeyboardInterrupt:
             self.stop()
-            print("\nInterrupted: stopped and reset controller.")
             raise
-        if progress:
-            print()
+
+    def send_file(self, filename, buffered=True, on_progress=None):
+        """
+        Streams a gcode file to the controller. See send_lines().
+        """
+        self.send_lines(read_gcode(filename), buffered=buffered, on_progress=on_progress)
