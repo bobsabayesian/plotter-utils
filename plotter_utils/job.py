@@ -7,6 +7,7 @@ import vpype
 from .drawing import write_registration_ticks
 from .gcode import document_to_gcode, estimate_plot
 from .layers import read_document
+from .optimize import optimization_report, optimize_document
 
 __all__ = [
     "Step", "Job", "build_layer_job", "register_action", "ACTIONS",
@@ -47,19 +48,25 @@ class Job:
             return cls([Step.from_dict(d) for d in json.load(f)])
 
 
-def build_layer_job(layers, paper_size="a1", tick_length="2mm", registration_file="registration.svg"):
+def build_layer_job(layers, paper_size="a1", tick_length="2mm", registration_file="registration.svg", optimize=True):
     """
     Builds the standard per-layer job from split_layers() output: for each layer,
     draw registration ticks, prompt for paper and pen, preview, approve, plot.
+    With optimize=True an optimize step runs first and the preview/plot use the
+    optimized copy (<layer>.opt.svg).
     """
     steps = []
     for layer in layers:
+        plot_file = layer.filename
+        if optimize:
+            plot_file = layer.filename.replace(".svg", ".opt.svg")
+            steps.append(Step("optimize", {"filename": layer.filename, "output": plot_file}))
         steps += [
             Step("registration", {"size": paper_size, "margin": tick_length, "filename": registration_file}),
             Step("user_prompt", {"message": f"Align paper to registration marks and load the {layer.pen} pen."}),
             Step("plot", {"filename": registration_file}),
-            Step("preview_approval", {"filename": layer.filename, "message": f"Approve the {layer.name} layer"}),
-            Step("plot", {"filename": layer.filename}),
+            Step("preview_approval", {"filename": plot_file, "message": f"Approve the {layer.name} layer"}),
+            Step("plot", {"filename": plot_file}),
         ]
     return Job(steps)
 
@@ -128,6 +135,20 @@ def _user_prompt(step, ctx):
 def _preview_approval(step, ctx):
     ctx.frontend.message(step.params["message"])
     ctx.frontend.preview(step.params["filename"])
+
+
+@register_action("optimize")
+def _optimize(step, ctx):
+    from .drawing import write_svg
+    p = step.params
+    before = read_document(p["filename"])
+    after = optimize_document(before, **p.get("options", {}))
+    write_svg(after, p["output"])
+    r = optimization_report(before, after)
+    ctx.frontend.message(
+        f"Optimized {p['filename']}: {r['before']['paths']} -> {r['after']['paths']} paths, "
+        f"pen-up travel {r['before']['travel_mm'] / 1000:.2f} -> {r['after']['travel_mm'] / 1000:.2f} m"
+    )
 
 
 @register_action("plot")

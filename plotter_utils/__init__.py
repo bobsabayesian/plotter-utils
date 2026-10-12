@@ -15,3 +15,4 @@ from .gcode_sender import *
 from .job import *
 from .layers import *
 from .notebook import *
+from .optimize import *

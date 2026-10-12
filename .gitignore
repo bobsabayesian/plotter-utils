@@ -21,3 +21,6 @@ venv/
 layerfile/
 jsonfiles/
 *.gcode
+
+jobfiles/
+machine.json
