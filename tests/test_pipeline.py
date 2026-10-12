@@ -127,3 +127,32 @@ def test_error_stops_job(fake_grbl):
     conn, _ = fake_grbl
     with pytest.raises(pu.GrblError, match="line 2"):
         conn.send_lines(["G0 X1", "BAD", "G0 X2"])
+
+
+def test_test_mode_never_opens_a_port():
+    assert pu.MachineProfile().test_mode  # safe by default
+    conn = pu.connect(pu.MachineProfile(port="/dev/does-not-exist"))
+    assert conn.simulated
+    conn.send_lines(["G21", "G0 X1 ; hi"], on_progress=lambda d, t: None)
+    assert conn.sent == ["G21", "G0 X1"]
+
+
+def test_test_mode_rejects_real_connection(art, tmp_path, fake_grbl, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    conn, _ = fake_grbl
+    layers = pu.split_layers(art, output_dir="layers")
+    ctx = pu.JobContext(pu.MachineProfile(test_mode=True), connection=conn)
+    runner = pu.JobRunner(pu.Job([pu.Step("plot", {"filename": layers[0].filename})]), ctx)
+    with pytest.raises(RuntimeError, match="test_mode"):
+        runner.run_next()
+
+
+def test_job_through_simulated_connection(art, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    layers = pu.split_layers(art, output_dir="layers")
+    profile = pu.MachineProfile()
+    conn = pu.connect(profile)
+    runner = pu.JobRunner(pu.build_layer_job(layers, "a4"), pu.JobContext(profile, connection=conn))
+    while not runner.done:
+        runner.run_next()
+    assert any(l.startswith("G01") for l in conn.sent)

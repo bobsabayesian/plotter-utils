@@ -24,6 +24,7 @@ class MachineProfile:
     on the real machine.
     """
     name: str = "idraw-h-a1"
+    test_mode: bool = True         # no hardware: connect() returns a simulator; set False once the plotter is here
     port: str = "/dev/ttyACM0"
     baud: int = 115200
     paper_size: str = "a1"

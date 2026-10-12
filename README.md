@@ -123,17 +123,39 @@ job.save("jobfiles/art.steps.json")
 pu.job_stepper(job, pu.JobContext(profile))         # DRY RUN: writes .gcode files, moves nothing
 ```
 
-Going live (after the checklist below):
+Going live (after the checklist below): set `profile.test_mode = False` (or save it in
+`machine.json`) and use `connect()`, which is the only place a connection gets made:
 
 ```python
-g = pu.GrblConnection(profile.port, profile.baud)
+profile.test_mode = False
+g = pu.connect(profile)                             # real GrblConnection on profile.port
 print(g.status())
 g.set_zero()                                        # current pen position becomes X0 Y0
 pu.job_stepper(job, pu.JobContext(profile, connection=g))
 ```
 
-Without a plotter attached, `plot` steps never touch hardware: they write `<file>.gcode` next to the
-SVG and report the estimated draw time. That is the default on purpose.
+### Test mode (until the plotter arrives)
+
+`MachineProfile.test_mode` is **`True` by default**. While it is on:
+
+- `pu.connect(profile)` returns a `SimulatedConnection`: same methods as `GrblConnection`
+  (`send_lines`, `set_zero`, `pen_up`, `status`, `stop`, ...), no serial port opened, nothing moves.
+  Everything it is asked to send is kept in `conn.sent` so you can inspect it.
+- A `plot` step refuses a real `GrblConnection` with a `RuntimeError`, so a stray connection cannot
+  move the machine.
+- Passing no connection at all still works as a file-only dry run (`.gcode` files are written).
+
+So your notebook code is the same in test and live mode; only `test_mode` changes:
+
+```python
+profile = pu.MachineProfile()                       # test_mode=True
+g = pu.connect(profile)                             # simulated
+pu.job_stepper(job, pu.JobContext(profile, connection=g))
+g.sent[:5]                                          # what would have been sent
+```
+
+Without any connection, `plot` steps never touch hardware: they write `<file>.gcode` next to the
+SVG and report the estimated draw time.
 
 Handy one-offs:
 
@@ -202,8 +224,8 @@ merged into one file so each pen is loaded once and the paths are optimized toge
 **Registry + Frontend.** `ACTIONS` maps an action name to a handler `fn(step, ctx)`. Handlers talk to
 the user only through `ctx.frontend.message(text)` / `ctx.frontend.preview(svg_path)`.
 
-**Dry run by default.** `JobContext.connection is None` means plot steps write G-code files instead
-of moving the machine.
+**Test mode by default.** `MachineProfile.test_mode` is on until you turn it off; see
+[Test mode](#test-mode-until-the-plotter-arrives).
 
 ---
 
@@ -276,6 +298,8 @@ G00 X0 Y0
 | `find_ports()` | Likely USB serial devices `(device, description)`. |
 | `read_gcode(file)`, `clean_gcode_line(l)` | Load a file, stripping `;` and `( )` comments and blank lines. |
 | `check_gcode(file)` | Dry summary: line count, laser/spindle use (`M3`/`M4`), XY extents. |
+| `connect(profile)` | The connection factory: `SimulatedConnection` when `profile.test_mode`, else `GrblConnection`. |
+| `SimulatedConnection()` | Hardware-free stand-in with the same methods; records lines in `.sent`. |
 | `GrblConnection(port, baud=115200)` | Context-manager serial connection (see below). |
 | `GrblError` | Raised on `error:N`, `ALARM:N`, a stop, or a long silence. |
 
@@ -334,6 +358,7 @@ The per-layer sequence from `build_layer_job`:
 | Field | Default | Meaning |
 |---|---|---|
 | `name` | `"idraw-h-a1"` | Label. |
+| `test_mode` | `True` | No hardware: `connect()` returns a simulator and real connections are refused. Set `False` once the plotter is here. |
 | `port` | `"/dev/ttyACM0"` | Serial device. |
 | `baud` | `115200` | Serial speed. |
 | `paper_size` | `"a1"` | Page size string used when building jobs. |
@@ -507,7 +532,7 @@ against a pty that stands in for the controller. None of it needs hardware.
 1. **Core is pure.** No `print`, `display`, or widgets outside `notebook.py` and the notebook
    wrappers in `drawing.py`.
 2. **Plans are data.** Jobs and profiles serialize to JSON so a GUI can edit and store them.
-3. **Dry run by default.** Hardware moves only when you hand over a `connection`.
+3. **Test mode by default.** Hardware moves only when `test_mode` is off *and* you hand over a real `connection`.
 4. **One source of machine truth.** Hardware numbers live in `MachineProfile`, not in notebooks.
 5. **Fail loud before the machine moves.** Bounds checks and G-code generation happen before any
    serial write.

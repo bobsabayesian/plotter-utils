@@ -95,8 +95,9 @@ class PrintFrontend(Frontend):
 @dataclass
 class JobContext:
     """
-    Shared state for a run. connection is a GrblConnection; leave it None for a
-    dry run, where plot steps write <name>.gcode next to the SVG instead of sending.
+    Shared state for a run. connection comes from connect(profile); leave it None for a
+    file-only dry run, where plot steps write <name>.gcode next to the SVG instead of sending.
+    With profile.test_mode on, only a simulated connection is accepted.
     """
     profile: object
     frontend: Frontend = field(default_factory=PrintFrontend)
@@ -161,6 +162,9 @@ def _plot(step, ctx):
         f"{filename}: {est['draw_mm'] / 1000:.2f} m drawn, {est['travel_mm'] / 1000:.2f} m pen-up, "
         f"about {est['seconds'] / 60:.1f} min"
     )
+    if ctx.profile.test_mode and not getattr(ctx.connection, "simulated", ctx.connection is None):
+        raise RuntimeError("profile.test_mode is on but a real connection was supplied; "
+                           "use pu.connect(profile) or set test_mode=False")
     if ctx.connection is None:
         out = os.path.splitext(filename)[0] + ".gcode"
         with open(out, "w") as f:

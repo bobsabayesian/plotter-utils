@@ -6,7 +6,7 @@ import serial
 from serial.tools import list_ports
 
 __all__ = [
-    "GrblConnection", "GrblError", "find_ports", "read_gcode", "check_gcode",
+    "GrblConnection", "SimulatedConnection", "connect", "GrblError", "find_ports", "read_gcode", "check_gcode",
     "clean_gcode_line", "DEFAULT_BAUD",
 ]
 
@@ -211,3 +211,71 @@ class GrblConnection:
         Streams a gcode file to the controller. See send_lines().
         """
         self.send_lines(read_gcode(filename), buffered=buffered, on_progress=on_progress)
+
+
+class SimulatedConnection:
+    """
+    Stands in for GrblConnection with no hardware: same methods, nothing is opened or
+    moved. Every line "sent" is kept in .sent so you can inspect what would have gone
+    to the machine.
+    """
+    simulated = True
+
+    def __init__(self):
+        self.sent = []
+        self._stopped = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def close(self):
+        pass
+
+    def status(self):
+        return "<Idle|MPos:0.000,0.000,0.000|FS:0,0> (simulated)"
+
+    def command(self, line):
+        self.sent.append(line.strip())
+        return []
+
+    def unlock(self):
+        return self.command("$X")
+
+    def stop(self):
+        self._stopped = True
+
+    def set_zero(self):
+        return self.command("G92 X0 Y0")
+
+    def pen_up(self, z=0):
+        return self.command(f"G00 Z{z:g}")
+
+    def pen_down(self, z=6):
+        return self.command(f"G00 Z{z:g}")
+
+    def send_lines(self, lines, buffered=True, on_progress=None):
+        self._stopped = False
+        lines = [l for l in (clean_gcode_line(l) for l in lines) if l]
+        for i, line in enumerate(lines, 1):
+            if self._stopped:
+                raise GrblError("Stopped")
+            self.sent.append(line)
+            if on_progress:
+                on_progress(i, len(lines))
+
+    def send_file(self, filename, buffered=True, on_progress=None):
+        self.send_lines(read_gcode(filename), buffered=buffered, on_progress=on_progress)
+
+
+def connect(profile):
+    """
+    The one place a connection is made. With profile.test_mode (the default) it returns
+    a SimulatedConnection and never touches a serial port; otherwise it opens the
+    real GrblConnection on profile.port.
+    """
+    if profile.test_mode:
+        return SimulatedConnection()
+    return GrblConnection(profile.port, profile.baud)
