@@ -377,3 +377,75 @@ def test_qr_svg_and_qr_outside_notebook(remote):
     svg = pu.qr_svg(remote.url())
     assert svg.startswith("<svg") and "#fff" in svg
     assert remote.qr() is None  # no notebook under pytest: must be a quiet no-op
+
+
+# ---- layer picker and tick size ---------------------------------------------
+
+def _plotted_xs(remote):
+    return [float(l.split("X")[1].split()[0]) for l in remote.conn.sent if l.startswith("G01")]
+
+
+def test_remote_lists_layers_and_starts_on_the_first(remote):
+    state = remote.call("/api/state")[1]
+    assert [(l["pen"], l["name"]) for l in state["layers"]] == [("Red", "Red box"), ("Black", "Black"), ("Red", "Red line")]
+    assert state["layer"] == state["layers"][0]["id"]  # several layers: not "all"
+
+
+def test_remote_plots_only_the_selected_layer(remote):
+    black = remote.call("/api/state")[1]["layers"][1]["id"]
+    assert remote.call("/api/layer", {"layer": black})[1]["layer"] == black
+    remote.call("/api/zero", {})
+    assert remote.call("/api/plot", {})[0] == 200
+    remote.wait_idle()
+    xs = _plotted_xs(remote)
+    assert xs and max(xs) < 50  # only the black line (x up to 45 mm); the red line sits at 58 mm
+    assert not any(abs(x - 31.75) < 0.01 for x in xs)  # and none of the red box's far edge
+
+
+def test_remote_all_layers_plots_everything_and_a_finished_layer_advances_the_picker(remote):
+    layers = remote.call("/api/state")[1]["layers"]
+    remote.call("/api/layer", {"layer": "all"})
+    remote.call("/api/zero", {})
+    remote.call("/api/plot", {})
+    remote.wait_idle()
+    assert max(_plotted_xs(remote)) > 55  # includes the red line
+
+    remote.conn.sent.clear()
+    remote.call("/api/layer", {"layer": layers[0]["id"]})
+    remote.call("/api/plot", {})
+    remote.wait_idle()
+    state = remote.call("/api/state")[1]
+    assert state["layer"] == layers[1]["id"] and "Swap to the Black pen" in state["message"]
+
+
+def test_remote_layer_errors(remote):
+    assert remote.call("/api/layer", {"layer": 999})[0] == 409
+    remote.call("/api/zero", {})
+    remote.call("/api/plot", {"delay": 5})
+    assert remote.call("/api/layer", {"layer": "all"})[0] == 409  # busy (counting down)
+    remote.call("/api/stop", {})
+    remote.wait_idle()
+
+
+def test_remote_tick_size_is_adjustable(remote):
+    assert remote.call("/api/state")[1]["tick_mm"] == 2
+    remote.call("/api/zero", {})
+    assert remote.call("/api/registration", {"tick_mm": 10})[0] == 200
+    remote.wait_idle()
+    moves = [l for l in remote.conn.sent if l.startswith("G01")]
+    assert "G01 X10.0000 Y10.0000" in moves  # top-left tick now reaches 10 mm in on both axes
+    assert remote.call("/api/state")[1]["tick_mm"] == 10
+    assert remote.call("/api/registration", {"tick_mm": 0.1})[0] == 409
+    assert remote.call("/api/registration", {"tick_mm": 80})[0] == 409
+    assert remote.call("/api/state")[1]["tick_mm"] == 10  # a refused value changes nothing
+
+
+def test_layer_helpers():
+    doc = vp.Document(page_size=(100, 100))
+    lc = vp.LineCollection()
+    lc.append([0j, 10 + 10j])
+    doc.add(lc, layer_id=5)
+    assert [s.id for s in pu.layer_summaries(doc)] == [5]
+    assert pu.extract_layer(doc, 5).layers[5].__len__() == 1
+    with pytest.raises(KeyError):
+        pu.extract_layer(doc, 6)

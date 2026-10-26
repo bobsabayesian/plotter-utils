@@ -10,11 +10,13 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+import vpype
+
 from .drawing import page_size_label, page_size_string, registration_ticks_document, svg_page_size_mm
 from .gcode import document_to_gcode, estimate_plot
 from .gcode_sender import connect, read_gcode
 from .job import wait_with_cancel
-from .layers import read_document
+from .layers import extract_layer, layer_summaries, read_document
 from .optimize import optimize_document
 
 __all__ = ["RemoteControl", "serve_remote", "qr_svg"]
@@ -68,7 +70,7 @@ class RemoteControl:
         self.conn = connection
         self.file = file
         self.optimize = optimize
-        self.tick_length = tick_length
+        self.tick_mm = vpype.convert_length(tick_length) / vpype.convert_length("1mm")
         self.allow_laser = allow_laser
         self.save_path = save_path
 
@@ -81,6 +83,9 @@ class RemoteControl:
         self.message = "Ready."
         self.httpd = None
         self.paper = self._paper_from_file()
+        self.layers = []         # LayerSummary list for the loaded SVG
+        self.layer_sel = "all"   # a layer id, or "all"
+        self._load_layers()
         self.requests = collections.deque(maxlen=50)  # recent (time, client ip, path, user agent)
         self.cancel = threading.Event()
         self.counting = False  # True during the start delay, before the machine has moved
@@ -96,7 +101,10 @@ class RemoteControl:
             "file": os.path.basename(self.file) if self.file else None,
             "has_preview": bool(self.file and self.file.lower().endswith(".svg")),
             "paper_size": page_size_label(*self.paper) if self.paper else p.paper_size,
-            "paper_source": "file" if self.paper else "profile", "tick_length": self.tick_length,
+            "paper_source": "file" if self.paper else "profile", "tick_mm": self.tick_mm,
+            "layers": [{"id": l.id, "name": l.name, "pen": l.pen, "hex": l.hex_color, "paths": l.paths}
+                       for l in self.layers],
+            "layer": self.layer_sel,
             "z_range": Z_RANGE, "start_delay_s": self.profile.start_delay_s,
         }
 
@@ -115,7 +123,34 @@ class RemoteControl:
             raise FileNotFoundError(path)
         self.file = path
         self.paper = self._paper_from_file()
+        self._load_layers()
         self.message = f"File set: {os.path.basename(path)}"
+
+    def _load_layers(self):
+        """Lists the SVG's layers for the picker. Several layers start on the first one,
+        so a stray tap doesn't draw every color with one pen."""
+        self.layers = []
+        if self.file and self.file.lower().endswith(".svg"):
+            self.layers = layer_summaries(read_document(self.file), self.profile.pens)
+        self.layer_sel = self.layers[0].id if len(self.layers) > 1 else "all"
+
+    def select_layer(self, layer):
+        if self.busy:
+            raise RemoteError(f"Busy: {self.busy}")
+        if layer == "all":
+            self.layer_sel = "all"
+        elif any(l.id == layer for l in self.layers):
+            self.layer_sel = layer
+        else:
+            raise RemoteError("No such layer")
+        self.message = "All layers (one pen)" if layer == "all" else \
+            "Layer: {name}. Load the {pen} pen.".format(**next(vars(l) for l in self.layers if l.id == layer))
+
+    def set_tick(self, mm):
+        mm = float(mm)
+        if not 0.5 <= mm <= 50:
+            raise RemoteError("Tick size must be 0.5-50 mm")
+        self.tick_mm = mm
 
     # ---- actions (each returns after updating self.message) ----------------
 
@@ -181,17 +216,29 @@ class RemoteControl:
         if self.pen_z != self.profile.pen_up_z:
             raise RemoteError("Raise the pen first")
 
-    def start_registration(self, delay=None):
+    def start_registration(self, delay=None, tick_mm=None):
         self._require_ready()
-        doc = registration_ticks_document(self.paper_string(), self.tick_length)
+        if tick_mm is not None:
+            self.set_tick(tick_mm)
+        doc = registration_ticks_document(self.paper_string(), f"{self.tick_mm:g}mm")
         self._start_job("registration marks", document_to_gcode(doc, self.profile), delay=delay)
 
     def start_plot(self, delay=None):
         self._require_ready()
         if not self.file:
             raise RemoteError("No file chosen")
+        name = os.path.basename(self.file)
+        advance = None
         if self.file.lower().endswith(".svg"):
             doc = read_document(self.file)
+            if self.layer_sel != "all":
+                try:
+                    doc = extract_layer(doc, self.layer_sel)
+                except KeyError:
+                    raise RemoteError("That layer is no longer in the file; set the file again")
+                layer = next(l for l in self.layers if l.id == self.layer_sel)
+                name = f"{name} / {layer.name} ({layer.pen})"
+                advance = self._next_layer_after(layer.id)
             if self.optimize:
                 doc = optimize_document(doc)
             lines = document_to_gcode(doc, self.profile)
@@ -202,9 +249,21 @@ class RemoteControl:
             if not self.allow_laser and any(re.search(r"\bM0?[34]\b", l, re.I) for l in lines):
                 raise RemoteError("File uses M3/M4 (laser/spindle); start serve_remote(allow_laser=True) to permit")
             note = f"{len(lines)} lines"
-        self._start_job(os.path.basename(self.file), lines, note, delay)
+        self._start_job(name, lines, note, delay, on_done=advance)
 
-    def _start_job(self, name, lines, note="", delay=None):
+    def _next_layer_after(self, layer_id):
+        """A callback that moves the picker to the following layer once this one finishes."""
+        ids = [l.id for l in self.layers]
+        if layer_id not in ids or ids.index(layer_id) == len(ids) - 1:
+            return None
+        nxt = next(l for l in self.layers if l.id == ids[ids.index(layer_id) + 1])
+
+        def advance():
+            self.layer_sel = nxt.id
+            self.message += f" Next layer: {nxt.name}. Swap to the {nxt.pen} pen."
+        return advance
+
+    def _start_job(self, name, lines, note="", delay=None, on_done=None):
         delay = self.profile.start_delay_s if delay is None else float(delay)
         if not 0 <= delay <= 600:
             raise RemoteError("Start delay must be 0-600 s")
@@ -226,7 +285,9 @@ class RemoteControl:
                     self.message = f"Plotting {name} {note}".strip()
                 self.conn.send_lines(lines, buffered=False, on_progress=lambda d, t: setattr(self, "progress", (d, t)))
                 self.pen_z = self.profile.pen_up_z
-                self.message = f"Done: {name}"
+                self.message = f"Done: {name}."
+                if on_done:
+                    on_done()
             except Exception as e:  # includes GrblError from stop/alarm
                 self.pos, self.pen_z = None, self.profile.pen_up_z
                 self.message = f"Stopped: {e}. Position lost; set zero again."
@@ -299,7 +360,8 @@ class RemoteControl:
                     "/api/save_height": lambda: remote.save_pen_height(body["which"]),
                     "/api/jog": lambda: remote.jog(body["dx"], body["dy"]),
                     "/api/zero": remote.set_zero,
-                    "/api/registration": lambda: remote.start_registration(body.get("delay")),
+                    "/api/registration": lambda: remote.start_registration(body.get("delay"), body.get("tick_mm")),
+                    "/api/layer": lambda: remote.select_layer(body["layer"]),
                     "/api/plot": lambda: remote.start_plot(body.get("delay")),
                     "/api/stop": remote.stop,
                 }
@@ -462,17 +524,25 @@ img{max-width:100%;border:1px solid var(--line);border-radius:8px;background:#ff
 <div class="kv">Applies to registration marks and plotting. STOP cancels the countdown.</div></section>
 
 <section><h2>3 · Registration marks</h2>
-<div class="kv">Paper <b id="paper"></b> <span id="papersrc"></span> · tick <b id="tick"></b></div>
-<button id="reg" style="width:100%">Draw registration marks</button></section>
+<div class="kv">Paper <b id="paper"></b> <span id="papersrc"></span></div>
+<div class="row" style="align-items:center"><label for="tickmm" style="flex:2">Tick size (mm)</label>
+<button id="tickdn" style="flex:0 0 56px">−</button>
+<input id="tickmm" type="number" min="0.5" max="50" step="0.5" inputmode="decimal" style="flex:1;min-height:48px;font:inherit;text-align:center;border-radius:11px;border:1px solid var(--line);padding:0 8px;background:var(--card);color:var(--ink)">
+<button id="tickup" style="flex:0 0 56px">+</button></div>
+<button id="reg" style="width:100%;margin-top:10px">Draw registration marks</button></section>
 
-<section><h2>4 · Plot file</h2>
-<div class="kv">File: <b id="file">none</b></div><img id="prev" alt="" hidden>
-<button id="plot" class="primary" style="width:100%;margin-top:10px">Plot this file</button></section>
+<section><h2>4 · Plot</h2>
+<div class="kv">File: <b id="file">none</b></div>
+<div id="layerbox" hidden>
+<div class="row" style="align-items:center"><span id="swatch" style="flex:0 0 28px;height:28px;border-radius:50%;border:1px solid var(--line)"></span>
+<select id="layer" style="flex:1;min-height:48px;font:inherit;border-radius:11px;border:1px solid var(--line);padding:0 10px;background:var(--card);color:var(--ink)"></select></div>
+<div class="kv" id="layerinfo"></div></div><img id="prev" alt="" hidden>
+<button id="plot" class="primary" style="width:100%;margin-top:10px">Plot</button></section>
 
 <button id="stop">STOP</button>
 <script>
 const T=new URLSearchParams(location.search).get('token');
-let step=10,S={},delaySet=false;
+let step=10,S={},delaySet=false,tickSet=false,layerSig='';
 const $=id=>document.getElementById(id);
 async function api(path,body){
   const r=await fetch(path,{method:body===undefined?'GET':'POST',headers:{'X-Token':T,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
@@ -483,13 +553,25 @@ function render(s){S=s;
   const [d,t]=s.progress;$('bar').firstElementChild.style.width=(s.busy&&t?100*d/t:0)+'%';
   $('pos').textContent=s.pos?s.pos[0].toFixed(1)+', '+s.pos[1].toFixed(1)+' mm (estimate)':'not set';
   $('penz').textContent='Z'+s.pen_z;$('upz').textContent='Z'+s.pen_up_z;$('downz').textContent='Z'+s.pen_down_z;
-  $('paper').textContent=s.paper_size;$('papersrc').textContent=s.paper_source==='file'?'(from the loaded file)':'(from profile; file has no page size)';$('tick').textContent=s.tick_length;
+  $('paper').textContent=s.paper_size;$('papersrc').textContent=s.paper_source==='file'?'(from the loaded file)':'(from profile; file has no page size)';if(!tickSet){$('tickmm').value=s.tick_mm;tickSet=true}
   $('file').textContent=s.file||'none';$('prev').hidden=!s.has_preview;
   if(s.has_preview&&!$('prev').src)$('prev').src='/api/file.svg?token='+T;
   for(const b of document.querySelectorAll('button:not(#stop)'))b.disabled=!!s.busy;
+  renderLayers(s);$('layer').disabled=!!s.busy;
   $('plot').disabled=!!s.busy||!s.file;
   if(!delaySet){$('delay').value=s.start_delay_s;delaySet=true}
   if(!document.activeElement||document.activeElement.id!=='z')$('z').value=s.pen_z}
+function renderLayers(s){
+  const L=s.layers||[];$('layerbox').hidden=L.length===0;
+  const sig=JSON.stringify(L);
+  if(sig!==layerSig){layerSig=sig;const sel=$('layer');sel.innerHTML='';
+    if(L.length>1){const o=document.createElement('option');o.value='all';o.textContent='All layers (one pen)';sel.appendChild(o)}
+    L.forEach((l,i)=>{const o=document.createElement('option');o.value=l.id;o.textContent=(i+1)+' · '+l.pen+' · '+l.name+' ('+l.paths+' paths)';sel.appendChild(o)})}
+  if(document.activeElement!==$('layer'))$('layer').value=String(s.layer);
+  const cur=L.find(l=>String(l.id)===String(s.layer));
+  $('swatch').style.background=cur?(cur.hex||'transparent'):'linear-gradient(135deg,#e33,#fc3,#3c6,#36f)';
+  $('layerinfo').textContent=cur?'Load the '+cur.pen+' pen before plotting this layer.':(L.length?'Every layer is drawn with the one pen that is loaded.':'');
+  $('plot').textContent=cur?'Plot layer: '+cur.name:(L.length?'Plot all layers':'Plot')}
 const act=(path,body)=>api(path,body).then(render).catch(()=>{});
 $('z').onchange=e=>act('/api/pen',{z:+e.target.value});
 $('penup').onclick=()=>act('/api/pen',{z:S.pen_up_z});
@@ -497,8 +579,13 @@ $('pendown').onclick=()=>act('/api/pen',{z:S.pen_down_z});
 $('saveup').onclick=()=>act('/api/save_height',{which:'up'});
 $('savedown').onclick=()=>act('/api/save_height',{which:'down'});
 $('zero').onclick=()=>confirm('Set the current pen position as zero (X0 Y0)?')&&act('/api/zero',{});
-$('reg').onclick=()=>confirm('Draw registration marks at the page corners? Check the pen is loaded and the paper is placed.')&&act('/api/registration',{delay:+$('delay').value||0});
-$('plot').onclick=()=>confirm('Plot '+S.file+' now? The machine will move.')&&act('/api/plot',{delay:+$('delay').value||0});
+$('reg').onclick=()=>confirm('Draw registration marks at the page corners? Check the pen is loaded and the paper is placed.')&&act('/api/registration',{delay:+$('delay').value||0,tick_mm:+$('tickmm').value||2});
+$('layer').onchange=e=>act('/api/layer',{layer:e.target.value==='all'?'all':+e.target.value});
+$('plot').onclick=()=>{const cur=(S.layers||[]).find(l=>String(l.id)===String(S.layer));
+  const what=cur?'layer "'+cur.name+'" with the '+cur.pen+' pen':(S.layers&&S.layers.length>1?'ALL layers with whatever pen is loaded':S.file);
+  if(confirm('Plot '+what+' now? The machine will move.'))act('/api/plot',{delay:+$('delay').value||0})};
+const tickStep=d=>{$('tickmm').value=Math.min(50,Math.max(0.5,(+$('tickmm').value||2)+d))};
+$('tickdn').onclick=()=>tickStep(-0.5);$('tickup').onclick=()=>tickStep(0.5);
 $('stop').onclick=()=>act('/api/stop',{});
 for(const b of document.querySelectorAll('[data-j]'))b.onclick=()=>{const [x,y]=b.dataset.j.split(',').map(Number);act('/api/jog',{dx:x*step,dy:y*step})};
 for(const b of document.querySelectorAll('#steps button'))b.onclick=()=>{step=+b.dataset.s;for(const o of document.querySelectorAll('#steps button'))o.classList.toggle('on',o===b)};

@@ -6,7 +6,7 @@ import vpype
 
 from .config import DEFAULT_PENS
 
-__all__ = ["LayerInfo", "match_pen", "split_layers", "read_document"]
+__all__ = ["LayerInfo", "LayerSummary", "match_pen", "split_layers", "read_document", "layer_summaries", "extract_layer"]
 
 
 @dataclass
@@ -16,6 +16,50 @@ class LayerInfo:
     pen: str
     hex_color: str
     filename: str
+
+
+@dataclass
+class LayerSummary:
+    id: int            # vpype layer id (what extract_layer takes)
+    name: str
+    pen: str
+    hex_color: str
+    paths: int
+
+
+def _describe(layer, lid, pens):
+    """(name, pen, hex_color) for one vpype layer."""
+    color = layer.property(vpype.METADATA_FIELD_COLOR) if layer.property_exists(vpype.METADATA_FIELD_COLOR) else None
+    name = layer.property(vpype.METADATA_FIELD_NAME) if layer.property_exists(vpype.METADATA_FIELD_NAME) else f"layer{lid}"
+    rgb = _rgb(color)
+    return name, match_pen(rgb, pens), "#%02x%02x%02x" % rgb if rgb else ""
+
+
+def layer_summaries(document, pens=None):
+    """
+    Describes each non-empty layer of a vpype.Document, in layer-id order, as
+    LayerSummary(id, name, pen, hex_color, paths). Used for layer pickers.
+    """
+    out = []
+    for lid in sorted(document.layers):
+        layer = document.layers[lid]
+        if not layer.is_empty():
+            name, pen, hex_color = _describe(layer, lid, pens)
+            out.append(LayerSummary(lid, name, pen, hex_color, len(layer)))
+    return out
+
+
+def extract_layer(document, layer_id):
+    """
+    Returns a new Document holding only one layer of `document` (same page size,
+    same layer id and metadata). Raises KeyError if the layer is missing or empty.
+    """
+    layer = document.layers.get(layer_id)
+    if layer is None or layer.is_empty():
+        raise KeyError(layer_id)
+    single = vpype.Document(page_size=document.page_size)
+    single.add(layer, layer_id=layer_id, with_metadata=True)
+    return single
 
 
 def read_document(svg_filepath):
@@ -67,10 +111,8 @@ def split_layers(svg_filepath, output_dir="layerfile", pens=None, group_by_pen=F
         layer = doc.layers[lid]
         if layer.is_empty():
             continue
-        color = layer.property(vpype.METADATA_FIELD_COLOR) if layer.property_exists(vpype.METADATA_FIELD_COLOR) else None
-        name = layer.property(vpype.METADATA_FIELD_NAME) if layer.property_exists(vpype.METADATA_FIELD_NAME) else f"layer{lid}"
-        rgb = _rgb(color)
-        found.append([name, match_pen(rgb, pens), "#%02x%02x%02x" % rgb if rgb else "", layer])
+        name, pen, hex_color = _describe(layer, lid, pens)
+        found.append([name, pen, hex_color, layer])
 
     if group_by_pen:
         grouped = {}

@@ -263,6 +263,7 @@ Custom page sizes are `"WIDTHxHEIGHT[unit]"` with no spaces; units `in, cm, mm, 
 |---|---|
 | `read_document(svg)` | Multi-layer SVG -> `Document` (curves flattened to 0.1 mm, transforms applied). |
 | `match_pen(rgb, pens=None)` | Nearest pen name; `"Unassigned"` for no color. |
+| `layer_summaries(doc, pens=None)` / `extract_layer(doc, layer_id)` | Describe a Document's layers (`id`, `name`, `pen`, `hex_color`, `paths`) / get a one-layer copy. The remote page's picker uses these. |
 | `split_layers(svg, output_dir="layerfile", pens=None, group_by_pen=False)` | One SVG per layer (or per pen). Returns `LayerInfo(index, name, pen, hex_color, filename)` list. |
 
 ### `plotter_utils.optimize`
@@ -353,7 +354,7 @@ The per-layer sequence from `build_layer_job`:
 |---|---|
 | `serve_remote(profile, file=None, connection=None, host="0.0.0.0", port=8000, optimize=True, tick_length="2mm", allow_laser=False, save_path=None)` | Start the tablet page on a background thread; returns a `RemoteControl`. Uses a simulated connection in test mode. |
 | `qr_svg(text)` | A QR code as an SVG string. |
-| `RemoteControl` | `.url()`, `.qr()`, `.seen()`, `.set_file(path)`, `.stop()` (emergency), `.shutdown()`; its actions mirror the page buttons. |
+| `RemoteControl` | `.url()`, `.qr()`, `.select_layer(id_or_"all")`, `.set_tick(mm)`, `.seen()`, `.set_file(path)`, `.stop()` (emergency), `.shutdown()`; its actions mirror the page buttons. |
 
 ### `plotter_utils.notebook`
 
@@ -501,8 +502,9 @@ The cell returns immediately; the server runs on a background thread.
 |---|---|
 | **Pen height** | Slider moves the pen to any Z 0–9; **Pen up / Pen down** go to the stored values; **Save this as UP / DOWN** stores the current height in the profile (and in `save_path` if given). |
 | **Position & zero** | Jog X/Y by 1, 5, 10 or 50 mm; **Set zero here** (`G92 X0 Y0`). Shows an estimated position from zero. |
-| **Registration marks** | Draws corner ticks at the corners of the **loaded file's page size** (read from the SVG; the page shows which). Falls back to `profile.paper_size` for raw G-code files. |
-| **Plot file** | Previews the SVG and plots it (optimized, unless `optimize=False`). A raw `.gcode` file is sent as is. |
+| **Registration marks** | Draws corner ticks at the corners of the **loaded file's page size** (read from the SVG; the page shows which). The **Tick size (mm)** box (with − / +) sets how far in the diagonal runs, 0.5–50 mm. Falls back to `profile.paper_size` for raw G-code files. |
+| **Layer picker** | For an SVG, lists its layers as `1 · Red · Red box (12 paths)` with a color swatch and which pen to load. **Plot** draws only the selected layer; "All layers (one pen)" draws everything with whatever pen is loaded (the confirm dialog says so). With several layers the picker starts on the first, not "All". When a layer finishes it advances to the next and the status says which pen to swap in. |
+| **Plot** | Previews the SVG and plots the selected layer (optimized, unless `optimize=False`). A raw `.gcode` file is sent as is. |
 | **STOP** | Always visible. Feed hold + soft reset; position is lost, so set zero again. |
 
 Safeguards built in:
