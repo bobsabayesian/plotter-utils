@@ -461,3 +461,23 @@ def test_remote_go_to_zero(remote):
     assert state["pos"] == [0, 0] and remote.conn.sent == ["G90", "G01 X0 Y0 F2000"]
     remote.call("/api/pen", {"z": 6})
     assert remote.call("/api/goto_zero", {})[0] == 409  # pen is down
+
+
+def test_remote_preview_shows_only_the_selected_layer(remote):
+    layers = remote.call("/api/state")[1]["layers"]
+
+    def preview(layer):
+        url = f"http://127.0.0.1:{remote.port}/api/file.svg?layer={layer}"
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"X-Token": remote.token})) as r:
+            assert r.headers["Content-Type"] == "image/svg+xml"
+            return r.read().decode()
+
+    whole = preview("all")
+    assert all(f'id="layer{l["id"]}"' in whole for l in layers)
+    one = preview(layers[1]["id"])
+    assert f'id="layer{layers[1]["id"]}"' in one
+    assert f'id="layer{layers[0]["id"]}"' not in one and f'id="layer{layers[2]["id"]}"' not in one
+    assert 'width="21' in one and 'height="29' in one  # still the full A4 page, so it sits where it will plot
+    with pytest.raises(urllib.error.HTTPError) as e:
+        preview(999)
+    assert e.value.code == 404

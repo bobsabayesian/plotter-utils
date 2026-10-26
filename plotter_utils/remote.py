@@ -134,6 +134,21 @@ class RemoteControl:
             self.layers = layer_summaries(read_document(self.file), self.profile.pens)
         self.layer_sel = self.layers[0].id if len(self.layers) > 1 else "all"
 
+    def preview_svg(self, layer="all"):
+        """
+        SVG bytes for the page preview: the whole file, or just one layer drawn at its
+        place on the page. Raises KeyError for an unknown layer.
+        """
+        if layer == "all" or not self.layers:
+            with open(self.file, "rb") as f:
+                return f.read()
+        import io
+        from .drawing import write_svg
+        single = extract_layer(read_document(self.file), layer)
+        buf = io.StringIO()
+        vpype.write_svg(buf, single, page_size=single.page_size)
+        return buf.getvalue().encode()
+
     def select_layer(self, layer):
         if self.busy:
             raise RemoteError(f"Busy: {self.busy}")
@@ -354,8 +369,12 @@ class RemoteControl:
                 if path == "/api/state":
                     return self._send(200, remote.state())
                 if path == "/api/file.svg" and remote.file and remote.file.lower().endswith(".svg"):
-                    with open(remote.file, "rb") as f:
-                        return self._send(200, f.read(), "image/svg+xml")
+                    layer = (parse_qs(urlparse(self.path).query).get("layer") or ["all"])[0]
+                    try:
+                        svg = remote.preview_svg("all" if layer == "all" else int(layer))
+                    except (KeyError, ValueError):
+                        return self._send(404, {"error": "no such layer"})
+                    return self._send(200, svg, "image/svg+xml")
                 self._send(404, {"error": "not found"})
 
             def do_POST(self):
@@ -553,7 +572,7 @@ img{max-width:100%;border:1px solid var(--line);border-radius:8px;background:#ff
 <button id="stop">STOP</button>
 <script>
 const T=new URLSearchParams(location.search).get('token');
-let step=10,S={},delaySet=false,tickSet=false,layerSig='';
+let step=10,S={},delaySet=false,tickSet=false,layerSig='',previewKey='';
 const $=id=>document.getElementById(id);
 async function api(path,body){
   const r=await fetch(path,{method:body===undefined?'GET':'POST',headers:{'X-Token':T,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
@@ -566,7 +585,8 @@ function render(s){S=s;
   $('penz').textContent='Z'+s.pen_z;$('upz').textContent='Z'+s.pen_up_z;$('downz').textContent='Z'+s.pen_down_z;
   $('paper').textContent=s.paper_size;$('papersrc').textContent=s.paper_source==='file'?'(from the loaded file)':'(from profile; file has no page size)';if(!tickSet){$('tickmm').value=s.tick_mm;tickSet=true}
   $('file').textContent=s.file||'none';$('prev').hidden=!s.has_preview;
-  if(s.has_preview&&!$('prev').src)$('prev').src='/api/file.svg?token='+T;
+  const pk=s.has_preview?s.file+'|'+s.layer:'';
+  if(pk&&pk!==previewKey){previewKey=pk;$('prev').src='/api/file.svg?token='+T+'&layer='+encodeURIComponent(s.layer)+'&k='+Date.now()}
   for(const b of document.querySelectorAll('button:not(#stop)'))b.disabled=!!s.busy;
   renderLayers(s);$('layer').disabled=!!s.busy;
   $('plot').disabled=!!s.busy||!s.file;
