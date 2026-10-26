@@ -249,6 +249,7 @@ the user only through `ctx.frontend.message(text)` / `ctx.frontend.preview(svg_p
 | `paper_size_table()` | Paper-size guide as a list of dicts. |
 | `format_paper_sizes()` | The guide as text. |
 | `registration_ticks_document(size, tick_length)` | Corner tick marks as a `vpype.Document`. |
+| `registration_ticks_svg(size, tick_length)` | The same marks as SVG text, in memory (the remote page plots this; no file is written). |
 | `write_svg(document, filename)` | Save a Document as SVG at its page size. |
 | `write_registration_ticks(size, tick_length, filename)` | Ticks straight to a file. |
 | `preview_svg(filename)` | *(notebook)* show an SVG inline. |
@@ -332,7 +333,7 @@ switch to unbuffered first.
 |---|---|
 | `Step(action, params)` | One step. `to_dict()` / `from_dict()` flatten params next to `action`. |
 | `Job(steps)` | `.save(path)` / `Job.load(path)` JSON. |
-| `build_layer_job(layers, paper_size=None, tick_length, registration_file, optimize=True)` | The standard per-layer sequence (below). `paper_size=None` takes the page size from the SVG; pass a string to override. |
+| `build_layer_job(layers, paper_size=None, tick_length, registration_file=None, optimize=True)` | The standard per-layer sequence (below). `paper_size=None` takes the page size from the SVG; pass a string to override. Registration marks go to a temporary file unless you pass `registration_file`. |
 | `register_action(name)` | Decorator adding a step handler. |
 | `ACTIONS` | The registry (`registration`, `user_prompt`, `preview_approval`, `optimize`, `plot`). |
 | `Frontend`, `PrintFrontend` | UI interface and a trivial print implementation. |

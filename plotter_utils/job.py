@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import tempfile
 import threading
 import time
 from dataclasses import asdict, dataclass, field
@@ -71,11 +72,13 @@ class Job:
             return cls([Step.from_dict(d) for d in json.load(f)])
 
 
-def build_layer_job(layers, paper_size=None, tick_length="2mm", registration_file="registration.svg", optimize=True):
+def build_layer_job(layers, paper_size=None, tick_length="2mm", registration_file=None, optimize=True):
     """
     Builds the standard per-layer job from split_layers() output: for each layer,
     draw registration ticks, prompt for paper and pen, preview, approve, plot.
     paper_size defaults to the page size declared by the layer files (i.e. your SVG).
+    The registration marks go to a temporary file (registration_file=None), so no
+    registration.svg is left in your working folder; pass a path to keep one.
     With optimize=True an optimize step runs first and the preview/plot use the
     optimized copy (<layer>.opt.svg).
     """
@@ -84,6 +87,8 @@ def build_layer_job(layers, paper_size=None, tick_length="2mm", registration_fil
         if size is None:
             raise ValueError("The SVG declares no page size; pass paper_size, e.g. paper_size='a1'")
         paper_size = page_size_string(*size)
+    if registration_file is None:
+        registration_file = os.path.join(tempfile.gettempdir(), "plotter_utils_registration.svg")
     steps = []
     for layer in layers:
         plot_file = layer.filename

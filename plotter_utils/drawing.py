@@ -4,7 +4,7 @@ __all__ = [
     "PAPER_SIZE_GROUPS", "page_size_mm", "paper_size_table", "format_paper_sizes",
     "registration_ticks_document", "write_svg", "write_registration_ticks",
     "preview_svg", "generate_registration_ticks", "print_paper_sizes",
-    "svg_page_size_mm", "page_size_label", "page_size_string",
+    "svg_page_size_mm", "page_size_label", "page_size_string", "registration_ticks_svg",
 ]
 
 # ==============================================================================
@@ -158,6 +158,18 @@ def registration_ticks_document(paper_size="a1", tick_length="2mm"):
     doc = vpype.Document(page_size=(w, h))
     doc.add(lc, layer_id=1)
     return doc
+
+
+def registration_ticks_svg(paper_size="a1", tick_length="2mm"):
+    """
+    The registration ticks as SVG text, held in memory (nothing is written to disk).
+    Feed it to read_document(io.StringIO(text)) to plot it like any other SVG.
+    """
+    import io
+    doc = registration_ticks_document(paper_size, tick_length)
+    buf = io.StringIO()
+    vpype.write_svg(buf, doc, page_size=doc.page_size)
+    return buf.getvalue()
 
 
 def write_svg(document, filename):

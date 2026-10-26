@@ -502,3 +502,29 @@ def test_remote_settle_and_test_line(remote):
     assert remote.conn.sent == ["G90", "G00 Z6", "G04 P0.4", "G91", "G01 X10 F2000", "G90", "G00 Z0", "G04 P0.4"]
     remote.call("/api/pen", {"z": 6})
     assert remote.call("/api/test_line", {})[0] == 409  # pen must start up
+
+
+def test_remote_registration_writes_no_file_and_matches_the_direct_gcode(remote, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    before = set(os.listdir(tmp_path))
+    remote.call("/api/zero", {})
+    remote.conn.sent.clear()
+    assert remote.call("/api/registration", {"tick_mm": 5})[0] == 200
+    remote.wait_idle()
+    assert set(os.listdir(tmp_path)) == before  # nothing written next to the notebook
+    direct = pu.document_to_gcode(pu.registration_ticks_document(remote.paper_string(), "5mm"), remote.profile)
+    # the in-memory SVG round trip may shift a coordinate by ~0.001 mm, never the structure
+    sent = [l for l in remote.conn.sent if l != "G92 X0 Y0"]
+    assert [l.split()[0] for l in sent] == [l.split()[0] for l in direct]
+    for a, b in zip(sent, direct):
+        for wa, wb in zip(a.split()[1:], b.split()[1:]):
+            assert wa[0] == wb[0] and float(wa[1:]) == pytest.approx(float(wb[1:]), abs=0.01)
+
+
+def test_job_registration_goes_to_a_temp_file_by_default(art, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    layers = pu.split_layers(art, output_dir="layers")
+    reg = next(s for s in pu.build_layer_job(layers).steps if s.action == "registration")
+    assert os.path.dirname(reg.params["filename"]) == __import__("tempfile").gettempdir()
+    assert next(s for s in pu.build_layer_job(layers, registration_file="keep.svg").steps
+                if s.action == "registration").params["filename"] == "keep.svg"

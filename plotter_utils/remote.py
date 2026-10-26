@@ -1,5 +1,6 @@
 import collections
 import hmac
+import io
 import json
 import os
 import re
@@ -12,7 +13,7 @@ from urllib.parse import parse_qs, urlparse
 
 import vpype
 
-from .drawing import page_size_label, page_size_string, registration_ticks_document, svg_page_size_mm
+from .drawing import page_size_label, page_size_string, registration_ticks_svg, svg_page_size_mm
 from .gcode import document_to_gcode, estimate_plot
 from .gcode_sender import connect, read_gcode
 from .job import wait_with_cancel
@@ -142,8 +143,6 @@ class RemoteControl:
         if layer == "all" or not self.layers:
             with open(self.file, "rb") as f:
                 return f.read()
-        import io
-        from .drawing import write_svg
         single = extract_layer(read_document(self.file), layer)
         buf = io.StringIO()
         vpype.write_svg(buf, single, page_size=single.page_size)
@@ -274,7 +273,8 @@ class RemoteControl:
         self._require_ready()
         if tick_mm is not None:
             self.set_tick(tick_mm)
-        doc = registration_ticks_document(self.paper_string(), f"{self.tick_mm:g}mm")
+        # Same route as any SVG (SVG text -> Document -> G-code), but held in memory: no file is written
+        doc = read_document(io.StringIO(registration_ticks_svg(self.paper_string(), f"{self.tick_mm:g}mm")))
         self._start_job("registration marks", document_to_gcode(doc, self.profile), delay=delay)
 
     def start_plot(self, delay=None):
