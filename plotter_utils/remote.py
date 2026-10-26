@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlparse
 from .drawing import registration_ticks_document
 from .gcode import document_to_gcode, estimate_plot
 from .gcode_sender import connect, read_gcode
+from .job import wait_with_cancel
 from .layers import read_document
 from .optimize import optimize_document
 
@@ -52,6 +53,8 @@ class RemoteControl:
         self.progress = (0, 0)
         self.message = "Ready."
         self.httpd = None
+        self.cancel = threading.Event()
+        self.counting = False  # True during the start delay, before the machine has moved
 
     # ---- state -------------------------------------------------------------
 
@@ -64,7 +67,7 @@ class RemoteControl:
             "file": os.path.basename(self.file) if self.file else None,
             "has_preview": bool(self.file and self.file.lower().endswith(".svg")),
             "paper_size": p.paper_size, "tick_length": self.tick_length,
-            "z_range": Z_RANGE,
+            "z_range": Z_RANGE, "start_delay_s": self.profile.start_delay_s,
         }
 
     def set_file(self, path):
@@ -137,12 +140,12 @@ class RemoteControl:
         if self.pen_z != self.profile.pen_up_z:
             raise RemoteError("Raise the pen first")
 
-    def start_registration(self):
+    def start_registration(self, delay=None):
         self._require_ready()
         doc = registration_ticks_document(self.profile.paper_size, self.tick_length)
-        self._start_job("registration marks", document_to_gcode(doc, self.profile))
+        self._start_job("registration marks", document_to_gcode(doc, self.profile), delay=delay)
 
-    def start_plot(self):
+    def start_plot(self, delay=None):
         self._require_ready()
         if not self.file:
             raise RemoteError("No file chosen")
@@ -158,15 +161,28 @@ class RemoteControl:
             if not self.allow_laser and any(re.search(r"\bM0?[34]\b", l, re.I) for l in lines):
                 raise RemoteError("File uses M3/M4 (laser/spindle); start serve_remote(allow_laser=True) to permit")
             note = f"{len(lines)} lines"
-        self._start_job(os.path.basename(self.file), lines, note)
+        self._start_job(os.path.basename(self.file), lines, note, delay)
 
-    def _start_job(self, name, lines, note=""):
+    def _start_job(self, name, lines, note="", delay=None):
+        delay = self.profile.start_delay_s if delay is None else float(delay)
+        if not 0 <= delay <= 600:
+            raise RemoteError("Start delay must be 0-600 s")
         self._claim(name)  # claimed here so a second tap is rejected immediately
         self.progress = (0, len(lines))
         self.message = f"Plotting {name} {note}".strip()
+        self.cancel.clear()
 
         def work():
             try:
+                if delay > 0:
+                    self.counting = True
+                    ok = wait_with_cancel(delay, self.cancel, lambda n: setattr(
+                        self, "message", f"{name} starts in {n} s. Press STOP to cancel."))
+                    self.counting = False
+                    if not ok:
+                        self.message = f"Cancelled {name} before it started."
+                        return
+                    self.message = f"Plotting {name} {note}".strip()
                 self.conn.send_lines(lines, buffered=False, on_progress=lambda d, t: setattr(self, "progress", (d, t)))
                 self.pen_z = self.profile.pen_up_z
                 self.message = f"Done: {name}"
@@ -180,6 +196,10 @@ class RemoteControl:
 
     def stop(self):
         """Emergency stop. Allowed any time, even while a job holds the lock."""
+        self.cancel.set()
+        if self.counting:  # still in the start delay: the machine hasn't moved, so nothing is lost
+            self.message = "Cancelled before the plot started."
+            return
         self.conn.stop()
         self.pos = None
         self.message = "STOPPED. Position lost; set zero again."
@@ -231,8 +251,8 @@ class RemoteControl:
                     "/api/save_height": lambda: remote.save_pen_height(body["which"]),
                     "/api/jog": lambda: remote.jog(body["dx"], body["dy"]),
                     "/api/zero": remote.set_zero,
-                    "/api/registration": remote.start_registration,
-                    "/api/plot": remote.start_plot,
+                    "/api/registration": lambda: remote.start_registration(body.get("delay")),
+                    "/api/plot": lambda: remote.start_plot(body.get("delay")),
                     "/api/stop": remote.stop,
                 }
                 if path not in routes:
@@ -343,6 +363,10 @@ img{max-width:100%;border:1px solid var(--line);border-radius:8px;background:#ff
 <button id="zero" class="primary" style="width:100%">Set zero here</button>
 <div class="kv">Pen must be up to move. Put the pen at the paper's lower-left corner, then set zero.</div></section>
 
+<section><h2>Start delay</h2>
+<div class="row" style="align-items:center"><label for="delay" style="flex:2">Wait before plotting (seconds)</label><input id="delay" type="number" min="0" max="600" step="1" inputmode="numeric" style="flex:1;min-height:48px;font:inherit;border-radius:11px;border:1px solid var(--line);padding:0 12px;background:var(--card);color:var(--ink)"></div>
+<div class="kv">Applies to registration marks and plotting. STOP cancels the countdown.</div></section>
+
 <section><h2>3 · Registration marks</h2>
 <div class="kv">Paper <b id="paper"></b> · tick <b id="tick"></b></div>
 <button id="reg" style="width:100%">Draw registration marks</button></section>
@@ -354,7 +378,7 @@ img{max-width:100%;border:1px solid var(--line);border-radius:8px;background:#ff
 <button id="stop">STOP</button>
 <script>
 const T=new URLSearchParams(location.search).get('token');
-let step=10,S={};
+let step=10,S={},delaySet=false;
 const $=id=>document.getElementById(id);
 async function api(path,body){
   const r=await fetch(path,{method:body===undefined?'GET':'POST',headers:{'X-Token':T,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
@@ -370,6 +394,7 @@ function render(s){S=s;
   if(s.has_preview&&!$('prev').src)$('prev').src='/api/file.svg?token='+T;
   for(const b of document.querySelectorAll('button:not(#stop)'))b.disabled=!!s.busy;
   $('plot').disabled=!!s.busy||!s.file;
+  if(!delaySet){$('delay').value=s.start_delay_s;delaySet=true}
   if(!document.activeElement||document.activeElement.id!=='z')$('z').value=s.pen_z}
 const act=(path,body)=>api(path,body).then(render).catch(()=>{});
 $('z').onchange=e=>act('/api/pen',{z:+e.target.value});
@@ -378,8 +403,8 @@ $('pendown').onclick=()=>act('/api/pen',{z:S.pen_down_z});
 $('saveup').onclick=()=>act('/api/save_height',{which:'up'});
 $('savedown').onclick=()=>act('/api/save_height',{which:'down'});
 $('zero').onclick=()=>confirm('Set the current pen position as zero (X0 Y0)?')&&act('/api/zero',{});
-$('reg').onclick=()=>confirm('Draw registration marks at the page corners? Check the pen is loaded and the paper is placed.')&&act('/api/registration',{});
-$('plot').onclick=()=>confirm('Plot '+S.file+' now? The machine will move.')&&act('/api/plot',{});
+$('reg').onclick=()=>confirm('Draw registration marks at the page corners? Check the pen is loaded and the paper is placed.')&&act('/api/registration',{delay:+$('delay').value||0});
+$('plot').onclick=()=>confirm('Plot '+S.file+' now? The machine will move.')&&act('/api/plot',{delay:+$('delay').value||0});
 $('stop').onclick=()=>act('/api/stop',{});
 for(const b of document.querySelectorAll('[data-j]'))b.onclick=()=>{const [x,y]=b.dataset.j.split(',').map(Number);act('/api/jog',{dx:x*step,dy:y*step})};
 for(const b of document.querySelectorAll('#steps button'))b.onclick=()=>{step=+b.dataset.s;for(const o of document.querySelectorAll('#steps button'))o.classList.toggle('on',o===b)};

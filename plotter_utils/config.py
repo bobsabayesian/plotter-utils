@@ -32,6 +32,7 @@ class MachineProfile:
     pen_up_z: float = 0            # the iDraw lifts the pen with a Z move, 0-9
     pen_down_z: float = 6
     pen_settle_s: float = 0        # dwell after each pen move, if the pen needs time to land
+    start_delay_s: float = 0       # countdown before any plot/registration starts; Abort/STOP cancels it
     draw_feed: float = 2000        # mm/min; the reference project allows 50-2500
     invert_y: bool = False         # flip Y if drawings come out mirrored vertically
     pens: dict = field(default_factory=lambda: dict(DEFAULT_PENS))

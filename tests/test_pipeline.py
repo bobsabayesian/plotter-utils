@@ -251,3 +251,56 @@ def test_remote_bounds_error_is_a_refusal_not_a_crash(remote):
     remote.call("/api/zero", {})
     code, body = remote.call("/api/registration", {})
     assert code == 409 and "outside the bed" in body["error"]
+
+
+def test_wait_with_cancel():
+    import threading
+    ev = threading.Event()
+    ticks = []
+    assert pu.job.wait_with_cancel(0.25, ev, ticks.append) and ticks
+    threading.Timer(0.1, ev.set).start()
+    assert not pu.job.wait_with_cancel(5, ev)
+
+
+def test_job_plot_waits_then_sends(art, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    layers = pu.split_layers(art, output_dir="layers")
+    profile = pu.MachineProfile(start_delay_s=0.4)
+    conn = pu.connect(profile)
+    ctx = pu.JobContext(profile, connection=conn)
+    step = pu.Step("plot", {"filename": layers[0].filename})
+    t0 = time.monotonic()
+    pu.job.ACTIONS["plot"](step, ctx)
+    assert time.monotonic() - t0 >= 0.4 and conn.sent
+
+
+def test_job_abort_during_delay_sends_nothing(art, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    layers = pu.split_layers(art, output_dir="layers")
+    profile = pu.MachineProfile(start_delay_s=30)
+    conn = pu.connect(profile)
+    runner = pu.JobRunner(pu.Job([pu.Step("plot", {"filename": layers[0].filename})]),
+                          pu.JobContext(profile, connection=conn))
+    threading.Timer(0.2, runner.abort).start()
+    with pytest.raises(RuntimeError, match="Cancelled"):
+        runner.run_next()
+    assert conn.sent == [] or conn.sent == ["G92 X0 Y0"]  # abort() stops the connection; no gcode was sent
+
+
+def test_remote_delay_then_plot_and_cancel(remote):
+    remote.call("/api/zero", {})
+    assert remote.call("/api/plot", {"delay": 0.5})[0] == 200
+    time.sleep(0.15)
+    state = remote.call("/api/state")[1]
+    assert state["busy"] and "starts in" in state["message"]
+    assert not any(l.startswith("G01") for l in remote.conn.sent)  # still counting down
+    remote.wait_idle()
+    assert any(l.startswith("G01") for l in remote.conn.sent)
+
+    remote.conn.sent.clear()
+    assert remote.call("/api/plot", {"delay": 30})[0] == 200
+    time.sleep(0.15)
+    assert remote.call("/api/stop", {})[1]["zero_set"] is True  # nothing moved, so zero is kept
+    remote.wait_idle()
+    assert not any(l.startswith("G01") for l in remote.conn.sent)
+    assert remote.call("/api/plot", {"delay": 999})[0] == 409

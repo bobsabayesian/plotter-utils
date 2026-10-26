@@ -374,6 +374,7 @@ The per-layer sequence from `build_layer_job`:
 | `pen_up_z` | `0` | Z value (0–9) with the pen lifted. |
 | `pen_down_z` | `6` | Z value with the pen on paper. **Calibrate.** |
 | `pen_settle_s` | `0` | Dwell (`G04 P…`) after every pen move. |
+| `start_delay_s` | `0` | Countdown (seconds) before any `plot` step, or the remote page's registration/plot, starts sending. Abort / STOP cancels it before anything moves. Per-step override: `{"action": "plot", "filename": ..., "delay": 10}`. |
 | `draw_feed` | `2000` | Feed rate, mm/min. |
 | `invert_y` | `False` | Flip Y if drawings come out vertically mirrored. |
 | `pens` | 7 CMY+ pens | `{name: (r, g, b)}` used by `split_layers` color matching. |
@@ -410,7 +411,7 @@ notebook prototype load unchanged.
 | `user_prompt` | `message` | Shows an instruction to the human. |
 | `preview_approval` | `filename`, `message` | Shows the SVG for sign-off. |
 | `optimize` | `filename`, `output`, optional `options` (kwargs of `optimize_document`) | Writes an optimized copy and reports savings. |
-| `plot` | `filename` | Converts to G-code; sends it if `ctx.connection` is set, otherwise writes `<name>.gcode`. |
+| `plot` | `filename`, optional `delay` (seconds; default `profile.start_delay_s`) | Converts to G-code; sends it if `ctx.connection` is set, otherwise writes `<name>.gcode`. |
 
 ---
 
@@ -510,6 +511,7 @@ Safeguards built in:
   pen up; one job runs at a time (a second tap is rejected); only STOP works during a job.
 - **Limits.** Jogs are capped at 100 mm and, once zero is set and `bed_size_mm` is known, are refused
   if they would leave the bed. Z is limited to 0–9.
+- **Start delay.** A "Start delay" box on the page (default `profile.start_delay_s`) counts down before registration or a plot starts; STOP cancels the countdown without losing your zero.
 - **Confirmations.** Set zero, registration and plot each ask "are you sure?" on the tablet.
 - **Laser files.** A raw G-code file containing `M3`/`M4` is refused unless you start the server with
   `allow_laser=True`.

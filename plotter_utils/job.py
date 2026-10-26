@@ -1,5 +1,8 @@
 import json
+import math
 import os
+import threading
+import time
 from dataclasses import asdict, dataclass, field
 
 import vpype
@@ -13,6 +16,26 @@ __all__ = [
     "Step", "Job", "build_layer_job", "register_action", "ACTIONS",
     "Frontend", "PrintFrontend", "JobContext", "JobRunner",
 ]
+
+
+def wait_with_cancel(seconds, cancel, on_tick=None):
+    """
+    Sleeps for `seconds`, calling on_tick(whole_seconds_left) as the count changes.
+    Returns False if the `cancel` threading.Event was set first, else True.
+    """
+    end = time.monotonic() + seconds
+    last = None
+    while True:
+        if cancel.is_set():
+            return False
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            return True
+        whole = math.ceil(remaining)
+        if on_tick and whole != last:
+            on_tick(whole)
+            last = whole
+        time.sleep(min(0.2, remaining))
 
 
 # ==============================================================================
@@ -103,6 +126,7 @@ class JobContext:
     frontend: Frontend = field(default_factory=PrintFrontend)
     connection: object = None
     on_progress: object = None  # callable(done, total) during a plot
+    cancel: threading.Event = field(default_factory=threading.Event)  # set by JobRunner.abort()
 
 
 ACTIONS = {}
@@ -171,6 +195,11 @@ def _plot(step, ctx):
             f.write("\n".join(lines) + "\n")
         ctx.frontend.message(f"Dry run (no plotter connected): wrote {out}")
     else:
+        delay = float(step.params.get("delay", ctx.profile.start_delay_s))
+        if delay > 0:
+            ctx.frontend.message(f"Plot starts in {delay:g} s. Abort to cancel.")
+            if not wait_with_cancel(delay, ctx.cancel):
+                raise RuntimeError("Cancelled during the start delay; nothing was sent")
         ctx.connection.send_lines(lines, on_progress=ctx.on_progress)
         ctx.frontend.message("Plot complete.")
 
@@ -206,5 +235,6 @@ class JobRunner:
 
     def abort(self):
         self.aborted = True
+        self.ctx.cancel.set()
         if self.ctx.connection is not None:
             self.ctx.connection.stop()
