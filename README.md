@@ -249,6 +249,7 @@ the user only through `ctx.frontend.message(text)` / `ctx.frontend.preview(svg_p
 | `paper_size_table()` | Paper-size guide as a list of dicts. |
 | `format_paper_sizes()` | The guide as text. |
 | `registration_ticks_document(size, tick_length)` | Corner tick marks as a `vpype.Document`. |
+| `rotate_document(doc, degrees=90)` | Rotated copy of a Document, clockwise (multiples of 90; negative = counter-clockwise). Swaps the page size for quarter turns and moves the paths so they still fill the page; the input is untouched. |
 | `registration_ticks_svg(size, tick_length)` | The same marks as SVG text, in memory (the remote page plots this; no file is written). |
 | `write_svg(document, filename)` | Save a Document as SVG at its page size. |
 | `write_registration_ticks(size, tick_length, filename)` | Ticks straight to a file. |
@@ -265,7 +266,7 @@ Custom page sizes are `"WIDTHxHEIGHT[unit]"` with no spaces; units `in, cm, mm, 
 | `read_document(svg)` | Multi-layer SVG -> `Document` (curves flattened to 0.1 mm, transforms applied). |
 | `match_pen(rgb, pens=None)` | Nearest pen name; `"Unassigned"` for no color. |
 | `layer_summaries(doc, pens=None)` / `extract_layer(doc, layer_id)` | Describe a Document's layers (`id`, `name`, `pen`, `hex_color`, `paths`) / get a one-layer copy. The remote page's picker uses these. |
-| `split_layers(svg, output_dir="layerfile", pens=None, group_by_pen=False)` | One SVG per layer (or per pen). Returns `LayerInfo(index, name, pen, hex_color, filename)` list. |
+| `split_layers(svg, output_dir="layerfile", pens=None, group_by_pen=False, rotate=0)` | One SVG per layer (or per pen). Returns `LayerInfo(index, name, pen, hex_color, filename)` list. |
 
 ### `plotter_utils.optimize`
 
@@ -504,6 +505,7 @@ The cell returns immediately; the server runs on a background thread.
 | **Pen height** | Slider moves the pen to any Z 0–9; **Pen up / Pen down** go to the stored values; **Save this as UP / DOWN** stores the current height in the profile (and in `save_path` if given). **Pen settle time** is the pause after every pen move (`profile.pen_settle_s`); **Draw 10 mm test line** lowers the pen and draws a short line along +X so you can tune the down height and settle time. If marks come out as dots, the pen is moving before it has landed: raise the settle time. |
 | **Position & zero** | Jog X/Y by 1, 5, 10 or 50 mm; **Set zero here** (`G92 X0 Y0`); **Go to zero** returns the raised pen to that point in a straight line. Shows an estimated position from zero. |
 | **Registration marks** | Draws corner ticks at the corners of the **loaded file's page size** (read from the SVG; the page shows which). The **Tick size (mm)** box (with − / +) sets how far in the diagonal runs, 0.5–50 mm. Falls back to `profile.paper_size` for raw G-code files. |
+| **Rotate** | For an SVG, turns the drawing 0 / 90 / 180 / 270° **clockwise**, the same as turning the paper. The preview, the plot, the registration marks and the paper-size readout all follow (a landscape page becomes portrait). If the rotated page doesn't fit `bed_size_mm`, plotting is refused before anything moves. Rotation resets when you load another file. |
 | **Layer picker** | For an SVG, lists its layers as `1 · Red · Red box (12 paths)` with a color swatch and which pen to load. **Plot** draws only the selected layer; "All layers (one pen)" draws everything with whatever pen is loaded (the confirm dialog says so). With several layers the picker starts on the first, not "All". When a layer finishes it advances to the next and the status says which pen to swap in. |
 | **Plot** | Previews the SVG (just the selected layer, at its place on the page, when you pick one) and plots the selected layer (optimized, unless `optimize=False`). A raw `.gcode` file is sent as is. |
 | **STOP** | Always visible. Feed hold + soft reset; position is lost, so set zero again. |

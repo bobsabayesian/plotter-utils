@@ -4,7 +4,7 @@ __all__ = [
     "PAPER_SIZE_GROUPS", "page_size_mm", "paper_size_table", "format_paper_sizes",
     "registration_ticks_document", "write_svg", "write_registration_ticks",
     "preview_svg", "generate_registration_ticks", "print_paper_sizes",
-    "svg_page_size_mm", "page_size_label", "page_size_string", "registration_ticks_svg",
+    "svg_page_size_mm", "page_size_label", "page_size_string", "registration_ticks_svg", "rotate_document",
 ]
 
 # ==============================================================================
@@ -170,6 +170,31 @@ def registration_ticks_svg(paper_size="a1", tick_length="2mm"):
     buf = io.StringIO()
     vpype.write_svg(buf, doc, page_size=doc.page_size)
     return buf.getvalue()
+
+
+def rotate_document(document, degrees=90):
+    """
+    Returns a rotated copy of a vpype.Document, clockwise as you look at the page
+    (90 turns a landscape page into portrait, with the old top edge on the right).
+    The page size is swapped for quarter turns and the drawing is moved so it still
+    fills the page, so this is the same as turning the paper. Only multiples of 90
+    are allowed; the input is not modified.
+    """
+    import copy
+    import math
+
+    degrees = degrees % 360
+    if degrees % 90:
+        raise ValueError("Rotation must be a multiple of 90 degrees")
+    out = copy.deepcopy(document)  # clone() would drop the paths
+    if degrees == 0:
+        return out
+    w, h = document.page_size
+    out.rotate(math.radians(degrees))  # about the page corner, z -> z * e^(i*angle)
+    shift = {90: (h, 0), 180: (w, h), 270: (0, w)}[degrees]
+    out.translate(*shift)
+    out.page_size = (h, w) if degrees in (90, 270) else (w, h)
+    return out
 
 
 def write_svg(document, filename):

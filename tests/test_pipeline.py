@@ -1,5 +1,6 @@
 import os
 import pty
+import re
 import threading
 
 import pytest
@@ -528,3 +529,76 @@ def test_job_registration_goes_to_a_temp_file_by_default(art, tmp_path, monkeypa
     assert os.path.dirname(reg.params["filename"]) == __import__("tempfile").gettempdir()
     assert next(s for s in pu.build_layer_job(layers, registration_file="keep.svg").steps
                 if s.action == "registration").params["filename"] == "keep.svg"
+
+
+# ---- rotation ----------------------------------------------------------------
+
+def _doc_with_marker():
+    """A 300 x 200 px landscape page with one path from the top-left corner to a marker point."""
+    doc = vp.Document(page_size=(300, 200))
+    lc = vp.LineCollection()
+    lc.append([0j, 50 + 20j])
+    doc.add(lc, layer_id=1)
+    return doc
+
+
+@pytest.mark.parametrize("degrees, page, end", [
+    (0, (300, 200), (50, 20)),
+    (90, (200, 300), (180, 50)),    # top-left corner goes to top-right; (x, y) -> (H - y, x)
+    (180, (300, 200), (250, 180)),  # (x, y) -> (W - x, H - y)
+    (270, (200, 300), (20, 250)),   # (x, y) -> (y, W - x)
+    (-90, (200, 300), (20, 250)),   # negative = counter-clockwise
+    (360, (300, 200), (50, 20)),
+])
+def test_rotate_document_moves_paths_and_page_together(degrees, page, end):
+    doc = _doc_with_marker()
+    out = pu.rotate_document(doc, degrees)
+    assert tuple(out.page_size) == page
+    line = out.layers[1][0]
+    assert (line[-1].real, line[-1].imag) == pytest.approx(end, abs=1e-6)
+    assert doc.page_size == (300, 200) and doc.layers[1][0][-1] == 50 + 20j  # input untouched
+    xmin, ymin, xmax, ymax = out.bounds()
+    assert xmin >= -1e-6 and ymin >= -1e-6 and xmax <= page[0] + 1e-6 and ymax <= page[1] + 1e-6  # still on the page
+
+
+def test_rotate_document_rejects_odd_angles():
+    with pytest.raises(ValueError):
+        pu.rotate_document(_doc_with_marker(), 45)
+
+
+def test_split_layers_rotate_swaps_the_page(art, tmp_path):
+    layers = pu.split_layers(art, output_dir=str(tmp_path / "out"), rotate=90)
+    w, h = pu.svg_page_size_mm(layers[0].filename)
+    assert (round(w), round(h)) == (297, 210)  # A4 portrait became landscape
+
+
+def test_remote_rotation_turns_marks_preview_and_plot_and_checks_the_bed(remote):
+    state = remote.call("/api/state")[1]
+    assert state["rotation"] == 0 and state["paper_size"] == "a4"
+    assert remote.call("/api/rotate", {"degrees": 45})[0] == 409
+    state = remote.call("/api/rotate", {"degrees": 90})[1]
+    assert state["rotation"] == 90 and state["paper_size"] == "a4 (landscape)"
+
+    # the fixture's bed is 210 x 297; the rotated page is 297 wide, so the plot is refused up front
+    remote.call("/api/zero", {})
+    code, body = remote.call("/api/registration", {})
+    assert code == 409 and "outside the bed" in body["error"]
+    remote.profile.bed_size_mm = (297, 210)
+    remote.conn.sent.clear()
+    assert remote.call("/api/registration", {})[0] == 200
+    remote.wait_idle()
+    xs = [float(l.split("X")[1].split()[0]) for l in remote.conn.sent if " X" in l and "Y" in l]
+    ys = [float(l.split("Y")[1].split()[0]) for l in remote.conn.sent if " X" in l and "Y" in l]
+    assert max(xs) == pytest.approx(297, abs=0.1) and max(ys) == pytest.approx(210, abs=0.1)
+
+    remote.conn.sent.clear()
+    assert remote.call("/api/plot", {})[0] == 200  # red box was top-left; rotated 90 it sits at the right
+    remote.wait_idle()
+    assert min(_plotted_xs(remote)) > 150
+
+    url = f"http://127.0.0.1:{remote.port}/api/file.svg?layer=all"
+    with urllib.request.urlopen(urllib.request.Request(url, headers={"X-Token": remote.token})) as r:
+        assert re.search(r'width="29\.7\d*cm"', r.read().decode())  # preview is rotated too (landscape)
+
+    remote.set_file(remote.file)
+    assert remote.call("/api/state")[1]["rotation"] == 0  # loading a file resets it

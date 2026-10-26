@@ -13,7 +13,8 @@ from urllib.parse import parse_qs, urlparse
 
 import vpype
 
-from .drawing import page_size_label, page_size_string, registration_ticks_svg, svg_page_size_mm
+from .drawing import (page_size_label, page_size_string, registration_ticks_svg, rotate_document,
+                      svg_page_size_mm)
 from .gcode import document_to_gcode, estimate_plot
 from .gcode_sender import connect, read_gcode
 from .job import wait_with_cancel
@@ -83,6 +84,7 @@ class RemoteControl:
         self.progress = (0, 0)
         self.message = "Ready."
         self.httpd = None
+        self.rotation = 0  # degrees clockwise: 0, 90, 180, 270
         self.paper = self._paper_from_file()
         self.layers = []         # LayerSummary list for the loaded SVG
         self.layer_sel = "all"   # a layer id, or "all"
@@ -105,14 +107,18 @@ class RemoteControl:
             "paper_source": "file" if self.paper else "profile", "tick_mm": self.tick_mm,
             "layers": [{"id": l.id, "name": l.name, "pen": l.pen, "hex": l.hex_color, "paths": l.paths}
                        for l in self.layers],
-            "layer": self.layer_sel,
+            "layer": self.layer_sel, "rotation": self.rotation,
             "z_range": Z_RANGE, "start_delay_s": self.profile.start_delay_s,
         }
 
     def _paper_from_file(self):
-        """(width_mm, height_mm) the loaded SVG declares, or None (raw G-code, or no size)."""
+        """(width_mm, height_mm) of the loaded SVG's page as it will sit on the machine
+        (after any rotation), or None (raw G-code, or no declared size)."""
         if self.file and self.file.lower().endswith(".svg"):
-            return svg_page_size_mm(self.file)
+            size = svg_page_size_mm(self.file)
+            if size and self.rotation in (90, 270):
+                size = (size[1], size[0])
+            return size
         return None
 
     def paper_string(self):
@@ -123,6 +129,7 @@ class RemoteControl:
         if not os.path.exists(path):
             raise FileNotFoundError(path)
         self.file = path
+        self.rotation = 0
         self.paper = self._paper_from_file()
         self._load_layers()
         self.message = f"File set: {os.path.basename(path)}"
@@ -140,13 +147,33 @@ class RemoteControl:
         SVG bytes for the page preview: the whole file, or just one layer drawn at its
         place on the page. Raises KeyError for an unknown layer.
         """
-        if layer == "all" or not self.layers:
+        if (layer == "all" or not self.layers) and self.rotation == 0:
             with open(self.file, "rb") as f:
                 return f.read()
-        single = extract_layer(read_document(self.file), layer)
+        doc = self._view_document(layer)
         buf = io.StringIO()
-        vpype.write_svg(buf, single, page_size=single.page_size)
+        vpype.write_svg(buf, doc, page_size=doc.page_size)
         return buf.getvalue().encode()
+
+    def _view_document(self, layer):
+        """The loaded SVG as it will plot: just `layer` (or all), then rotated.
+        Raises KeyError for an unknown layer."""
+        doc = read_document(self.file)
+        if layer != "all" and self.layers:
+            doc = extract_layer(doc, layer)
+        return rotate_document(doc, self.rotation)
+
+    def set_rotation(self, degrees):
+        if self.busy:
+            raise RemoteError(f"Busy: {self.busy}")
+        if not (self.file and self.file.lower().endswith(".svg")):
+            raise RemoteError("Rotation applies to SVG files only")
+        degrees = int(degrees)
+        if degrees not in (0, 90, 180, 270):
+            raise RemoteError("Rotation must be 0, 90, 180 or 270")
+        self.rotation = degrees
+        self.paper = self._paper_from_file()
+        self.message = f"Rotated {degrees}° clockwise." if degrees else "Not rotated."
 
     def select_layer(self, layer):
         if self.busy:
@@ -284,15 +311,16 @@ class RemoteControl:
         name = os.path.basename(self.file)
         advance = None
         if self.file.lower().endswith(".svg"):
-            doc = read_document(self.file)
+            try:
+                doc = self._view_document(self.layer_sel)
+            except KeyError:
+                raise RemoteError("That layer is no longer in the file; set the file again")
             if self.layer_sel != "all":
-                try:
-                    doc = extract_layer(doc, self.layer_sel)
-                except KeyError:
-                    raise RemoteError("That layer is no longer in the file; set the file again")
                 layer = next(l for l in self.layers if l.id == self.layer_sel)
                 name = f"{name} / {layer.name} ({layer.pen})"
                 advance = self._next_layer_after(layer.id)
+            if self.rotation:
+                name += f" (rotated {self.rotation}°)"
             if self.optimize:
                 doc = optimize_document(doc)
             lines = document_to_gcode(doc, self.profile)
@@ -423,6 +451,7 @@ class RemoteControl:
                     "/api/goto_zero": remote.go_to_zero,
                     "/api/registration": lambda: remote.start_registration(body.get("delay"), body.get("tick_mm")),
                     "/api/layer": lambda: remote.select_layer(body["layer"]),
+                    "/api/rotate": lambda: remote.set_rotation(body["degrees"]),
                     "/api/plot": lambda: remote.start_plot(body.get("delay")),
                     "/api/stop": remote.stop,
                 }
@@ -599,6 +628,10 @@ img{max-width:100%;border:1px solid var(--line);border-radius:8px;background:#ff
 
 <section><h2>4 · Plot</h2>
 <div class="kv">File: <b id="file">none</b></div>
+<div id="rotbox" hidden>
+<div class="kv">Rotate (clockwise)</div>
+<div class="row steps" id="rots"><button data-r="0">0°</button><button data-r="90">90°</button><button data-r="180">180°</button><button data-r="270">270°</button></div>
+<div class="kv" id="rotinfo"></div></div>
 <div id="layerbox" hidden>
 <div class="row" style="align-items:center"><span id="swatch" style="flex:0 0 28px;height:28px;border-radius:50%;border:1px solid var(--line)"></span>
 <select id="layer" style="flex:1;min-height:48px;font:inherit;border-radius:11px;border:1px solid var(--line);padding:0 10px;background:var(--card);color:var(--ink)"></select></div>
@@ -622,8 +655,11 @@ function render(s){S=s;
   $('paper').textContent=s.paper_size;$('papersrc').textContent=s.paper_source==='file'?'(from the loaded file)':'(from profile; file has no page size)';if(!tickSet){$('tickmm').value=s.tick_mm;tickSet=true}
   if(!settleSet){$('settle').value=s.pen_settle_s;settleSet=true}
   $('file').textContent=s.file||'none';$('prev').hidden=!s.has_preview;
-  const pk=s.has_preview?s.file+'|'+s.layer:'';
-  if(pk&&pk!==previewKey){previewKey=pk;$('prev').src='/api/file.svg?token='+T+'&layer='+encodeURIComponent(s.layer)+'&k='+Date.now()}
+  $('rotbox').hidden=!s.has_preview;
+  for(const b of document.querySelectorAll('#rots button'))b.classList.toggle('on',+b.dataset.r===s.rotation);
+  $('rotinfo').textContent=s.rotation?'Drawing and registration marks are turned '+s.rotation+'° to match the paper.':'';
+  const pk=s.has_preview?s.file+'|'+s.layer+'|'+s.rotation:'';
+  if(pk&&pk!==previewKey){previewKey=pk;$('prev').src='/api/file.svg?token='+T+'&layer='+encodeURIComponent(s.layer)+'&rot='+s.rotation+'&k='+Date.now()}
   for(const b of document.querySelectorAll('button:not(#stop)'))b.disabled=!!s.busy;
   renderLayers(s);$('layer').disabled=!!s.busy;
   $('plot').disabled=!!s.busy||!s.file;
@@ -651,6 +687,7 @@ $('testline').onclick=()=>confirm('Lower the pen and draw a 10 mm line along +X 
 $('gozero').onclick=()=>act('/api/goto_zero',{});
 $('zero').onclick=()=>confirm('Set the current pen position as zero (X0 Y0)?')&&act('/api/zero',{});
 $('reg').onclick=()=>confirm('Draw registration marks at the page corners? Check the pen is loaded and the paper is placed.')&&act('/api/registration',{delay:+$('delay').value||0,tick_mm:+$('tickmm').value||2});
+for(const b of document.querySelectorAll('#rots button'))b.onclick=()=>act('/api/rotate',{degrees:+b.dataset.r});
 $('layer').onchange=e=>act('/api/layer',{layer:e.target.value==='all'?'all':+e.target.value});
 $('plot').onclick=()=>{const cur=(S.layers||[]).find(l=>String(l.id)===String(S.layer));
   const what=cur?'layer "'+cur.name+'" with the '+cur.pen+' pen':(S.layers&&S.layers.length>1?'ALL layers with whatever pen is loaded':S.file);

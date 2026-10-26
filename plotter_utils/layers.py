@@ -93,7 +93,7 @@ def _clean(text):
     return re.sub(r"[^A-Za-z0-9_-]+", "_", str(text)).strip("_") or "layer"
 
 
-def split_layers(svg_filepath, output_dir="layerfile", pens=None, group_by_pen=False):
+def split_layers(svg_filepath, output_dir="layerfile", pens=None, group_by_pen=False, rotate=0):
     """
     Splits a multi-layer SVG into one SVG per layer in output_dir, preserving the
     page size, and returns a list of LayerInfo (one per non-empty layer).
@@ -101,9 +101,15 @@ def split_layers(svg_filepath, output_dir="layerfile", pens=None, group_by_pen=F
     With group_by_pen=True, layers that match the same pen are merged into one
     layer/file, so each pen is loaded once and the paths can be optimized together.
     Groups keep the order in which each pen first appears.
+
+    rotate turns the artwork by 0/90/180/270 degrees clockwise (page size included)
+    before splitting, so the layer files, registration marks and plots all follow.
     """
     os.makedirs(output_dir, exist_ok=True)
     doc = read_document(svg_filepath)
+    if rotate:
+        from .drawing import rotate_document
+        doc = rotate_document(doc, rotate)
 
     # (name, pen, hex, LineCollection) per non-empty layer, in layer order
     found = []
