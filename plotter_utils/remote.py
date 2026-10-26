@@ -1,3 +1,4 @@
+import collections
 import hmac
 import json
 import os
@@ -5,6 +6,7 @@ import re
 import secrets
 import socket
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -58,6 +60,7 @@ class RemoteControl:
         self.message = "Ready."
         self.httpd = None
         self.paper = self._paper_from_file()
+        self.requests = collections.deque(maxlen=50)  # recent (time, client ip, path, user agent)
         self.cancel = threading.Event()
         self.counting = False  # True during the start delay, before the machine has moved
 
@@ -230,6 +233,11 @@ class RemoteControl:
             def log_message(self, *a):
                 pass
 
+            def _log(self):
+                ua = self.headers.get("User-Agent", "")
+                remote.requests.append((time.strftime("%H:%M:%S"), self.client_address[0],
+                                        urlparse(self.path).path, ua[:70]))
+
             def _send(self, code, body, ctype="application/json"):
                 data = body if isinstance(body, bytes) else json.dumps(body).encode()
                 self.send_response(code)
@@ -245,6 +253,7 @@ class RemoteControl:
                 return hmac.compare_digest(given, remote.token)
 
             def do_GET(self):
+                self._log()
                 path = urlparse(self.path).path
                 if not self._authorized():
                     return self._send(403, {"error": "bad token"})
@@ -258,6 +267,7 @@ class RemoteControl:
                 self._send(404, {"error": "not found"})
 
             def do_POST(self):
+                self._log()
                 if not self._authorized():
                     return self._send(403, {"error": "bad token"})
                 path = urlparse(self.path).path
@@ -294,6 +304,18 @@ class RemoteControl:
 
     def url(self):
         return f"http://{_lan_ip()}:{self.port}/?token={self.token}"
+
+    def seen(self, n=15, quiet_polls=True):
+        """
+        Prints the most recent requests that reached this server: time, client IP, path,
+        browser. Use it to check whether a device (e.g. the iPad) is reaching the plotter
+        at all. The page's once-a-second status polls are hidden unless quiet_polls=False.
+        """
+        rows = [r for r in self.requests if not (quiet_polls and r[2] == "/api/state")]
+        if not rows:
+            print("No requests have reached this server yet.")
+        for t, ip, path, ua in rows[-n:]:
+            print(f"{t}  {ip:<16} {path:<18} {ua}")
 
     def url_by_name(self):
         """Same link using <hostname>.local, which survives a changing IP (mDNS; works on Pi OS)."""

@@ -352,7 +352,7 @@ The per-layer sequence from `build_layer_job`:
 | Name | Description |
 |---|---|
 | `serve_remote(profile, file=None, connection=None, host="0.0.0.0", port=8000, optimize=True, tick_length="2mm", allow_laser=False, save_path=None)` | Start the tablet page on a background thread; returns a `RemoteControl`. Uses a simulated connection in test mode. |
-| `RemoteControl` | `.url()`, `.set_file(path)`, `.stop()` (emergency), `.shutdown()`; its actions mirror the page buttons. |
+| `RemoteControl` | `.url()`, `.seen()`, `.set_file(path)`, `.stop()` (emergency), `.shutdown()`; its actions mirror the page buttons. |
 
 ### `plotter_utils.notebook`
 
@@ -520,6 +520,8 @@ Safeguards built in:
 - **Test mode.** With `profile.test_mode` on, the page drives a `SimulatedConnection`: everything
   works except the machine moves. Try the page on the tablet like this first. The page shows a
   TEST MODE / LIVE badge.
+
+`remote.seen()` prints the latest requests that reached the server (time, client IP, browser), which is the quickest way to tell whether a tablet is reaching the machine at all.
 
 Other calls: `remote.set_file("other.svg")` to change the file, `remote.url()` to reprint the link,
 `remote.shutdown()` to stop serving. For live use, `profile.test_mode = False` first.

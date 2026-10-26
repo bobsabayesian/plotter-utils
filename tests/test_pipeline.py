@@ -361,3 +361,13 @@ def test_remote_registration_uses_the_loaded_files_paper(remote):
     remote.wait_idle()
     xs = [float(l.split("X")[1].split()[0]) for l in remote.conn.sent if l.startswith("G0") and " X" in l and "Y" in l]
     assert max(xs) == pytest.approx(210, abs=0.1)
+
+
+def test_remote_logs_who_connected(remote, capsys):
+    remote.call("/api/state")
+    remote.call("/api/zero", {})
+    remote.seen()
+    out = capsys.readouterr().out
+    assert "127.0.0.1" in out and "/api/zero" in out and "/api/state" not in out
+    remote.seen(quiet_polls=False)
+    assert "/api/state" in capsys.readouterr().out
