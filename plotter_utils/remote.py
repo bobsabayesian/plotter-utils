@@ -17,6 +17,10 @@ from .optimize import optimize_document
 
 __all__ = ["RemoteControl", "serve_remote"]
 
+# Servers started in this process. setdefault keeps the list across %autoreload, so a
+# re-run cell can still find and stop the server it started last time.
+_ACTIVE = globals().setdefault("_ACTIVE", [])
+
 MAX_JOG_MM = 100
 Z_RANGE = (0, 9)
 
@@ -309,7 +313,21 @@ def serve_remote(profile, file=None, connection=None, host="0.0.0.0", port=8000,
     conn = connection if connection is not None else connect(profile)
     if profile.test_mode and not getattr(conn, "simulated", False):
         raise RuntimeError("profile.test_mode is on but a real connection was supplied")
-    remote = RemoteControl(profile, conn, file, optimize, tick_length, allow_laser, save_path).start(host, port)
+
+    # Re-running the cell: stop the server from last time so its port is free again
+    while _ACTIVE:
+        _ACTIVE.pop().shutdown()
+
+    remote = RemoteControl(profile, conn, file, optimize, tick_length, allow_laser, save_path)
+    try:
+        remote.start(host, port)
+    except OSError as e:
+        raise OSError(
+            f"Port {port} is not available ({e.strerror}). Something outside this notebook is using it: "
+            f"try serve_remote(..., port={port + 1}) or port=0 (pick any free port), "
+            f"or find it with:  ss -ltnp | grep {port}"
+        ) from e
+    _ACTIVE.append(remote)
     print(f"Plotter remote ({'TEST MODE' if profile.test_mode else 'LIVE'}): {remote.url()}")
     return remote
 

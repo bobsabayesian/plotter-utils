@@ -304,3 +304,26 @@ def test_remote_delay_then_plot_and_cancel(remote):
     remote.wait_idle()
     assert not any(l.startswith("G01") for l in remote.conn.sent)
     assert remote.call("/api/plot", {"delay": 999})[0] == 409
+
+
+def test_serve_remote_twice_on_same_port_replaces_the_first(art):
+    profile = pu.MachineProfile()
+    first = pu.serve_remote(profile, host="127.0.0.1", port=0)
+    port = first.port
+    second = pu.serve_remote(profile, host="127.0.0.1", port=port)  # as if the cell were re-run
+    try:
+        assert second.port == port and second.token != first.token
+    finally:
+        second.shutdown()
+
+
+def test_serve_remote_port_taken_by_another_program_gives_a_clear_error():
+    import socket
+    blocker = socket.socket()
+    blocker.bind(("127.0.0.1", 0))
+    blocker.listen()
+    try:
+        with pytest.raises(OSError, match="not available"):
+            pu.serve_remote(pu.MachineProfile(), host="127.0.0.1", port=blocker.getsockname()[1])
+    finally:
+        blocker.close()
