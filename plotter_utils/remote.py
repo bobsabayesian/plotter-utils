@@ -97,7 +97,7 @@ class RemoteControl:
         return {
             "test_mode": p.test_mode, "busy": self.busy, "progress": self.progress,
             "message": self.message, "pen_z": self.pen_z, "pen_up_z": p.pen_up_z,
-            "pen_down_z": p.pen_down_z, "pos": self.pos, "zero_set": self.pos is not None,
+            "pen_down_z": p.pen_down_z, "pen_settle_s": p.pen_settle_s, "pos": self.pos, "zero_set": self.pos is not None,
             "file": os.path.basename(self.file) if self.file else None,
             "has_preview": bool(self.file and self.file.lower().endswith(".svg")),
             "paper_size": page_size_label(*self.paper) if self.paper else p.paper_size,
@@ -203,6 +203,35 @@ class RemoteControl:
         if self.save_path:
             self.profile.save(self.save_path)
         self.message = f"Pen {which} height = Z{self.pen_z:g}" + (" (saved)" if self.save_path else " (not saved to disk)")
+
+    def set_settle(self, seconds):
+        """Dwell after every pen move, so the pen has landed/lifted before XY motion continues."""
+        seconds = float(seconds)
+        if not 0 <= seconds <= 5:
+            raise RemoteError("Settle time must be 0-5 s")
+        self.profile.pen_settle_s = seconds
+        if self.save_path:
+            self.profile.save(self.save_path)
+        self.message = f"Pen settle time = {seconds:g} s" + (" (saved)" if self.save_path else " (not saved to disk)")
+
+    def draw_test_line(self, mm=10):
+        """Lowers the pen, draws a short line along +X from here, raises it. For tuning
+        pen-down height and settle time."""
+        mm = float(mm)
+        p = self.profile
+        if self.pen_z != p.pen_up_z:
+            raise RemoteError("Raise the pen first")
+        if not 1 <= mm <= 50:
+            raise RemoteError("Test line must be 1-50 mm")
+        if self.pos is not None and p.bed_size_mm and self.pos[0] + mm > p.bed_size_mm[0]:
+            raise RemoteError("The test line would leave the bed")
+        dwell = [f"G04 P{p.pen_settle_s:g}"] if p.pen_settle_s else []
+        self._run("test line", ["G90", f"G00 Z{p.pen_down_z:g}", *dwell,
+                                "G91", f"G01 X{mm:g} F{p.draw_feed:g}", "G90",
+                                f"G00 Z{p.pen_up_z:g}", *dwell])
+        if self.pos is not None:
+            self.pos = (self.pos[0] + mm, self.pos[1])
+        self.message = f"Drew a {mm:g} mm test line."
 
     def jog(self, dx, dy):
         dx, dy = float(dx), float(dy)
@@ -388,6 +417,8 @@ class RemoteControl:
                     "/api/pen": lambda: remote.move_pen(body["z"]),
                     "/api/save_height": lambda: remote.save_pen_height(body["which"]),
                     "/api/jog": lambda: remote.jog(body["dx"], body["dy"]),
+                    "/api/settle": lambda: remote.set_settle(body["seconds"]),
+                    "/api/test_line": lambda: remote.draw_test_line(body.get("mm", 10)),
                     "/api/zero": remote.set_zero,
                     "/api/goto_zero": remote.go_to_zero,
                     "/api/registration": lambda: remote.start_registration(body.get("delay"), body.get("tick_mm")),
@@ -538,7 +569,12 @@ img{max-width:100%;border:1px solid var(--line);border-radius:8px;background:#ff
 <input type="range" id="z" min="0" max="9" step="0.5" value="0">
 <div class="row"><button id="penup">Pen up</button><button id="pendown">Pen down</button></div>
 <div class="row" style="margin-top:10px"><button id="saveup">Save this as UP</button><button id="savedown">Save this as DOWN</button></div>
-<div class="kv">Slide to move the pen, then save the height that's right.</div></section>
+<div class="kv">Slide to move the pen, then save the height that's right.</div>
+<div class="row" style="align-items:center;margin-top:12px"><label for="settle" style="flex:2">Pen settle time (s)</label>
+<input id="settle" type="number" min="0" max="5" step="0.1" inputmode="decimal" style="flex:1;min-height:48px;font:inherit;text-align:center;border-radius:11px;border:1px solid var(--line);padding:0 8px;background:var(--card);color:var(--ink)">
+<button id="savesettle" style="flex:0 0 90px">Save</button></div>
+<button id="testline" style="width:100%;margin-top:10px">Draw 10 mm test line</button>
+<div class="kv">Pause after each pen move, so the pen has landed before it moves. If marks come out as dots, raise it. The test line goes 10 mm along +X from where the pen is.</div></section>
 
 <section><h2>2 · Position &amp; zero</h2>
 <div class="row steps" id="steps"><button data-s="1">1 mm</button><button data-s="5">5 mm</button><button data-s="10" class="on">10 mm</button><button data-s="50">50 mm</button></div>
@@ -572,7 +608,7 @@ img{max-width:100%;border:1px solid var(--line);border-radius:8px;background:#ff
 <button id="stop">STOP</button>
 <script>
 const T=new URLSearchParams(location.search).get('token');
-let step=10,S={},delaySet=false,tickSet=false,layerSig='',previewKey='';
+let step=10,S={},delaySet=false,tickSet=false,settleSet=false,layerSig='',previewKey='';
 const $=id=>document.getElementById(id);
 async function api(path,body){
   const r=await fetch(path,{method:body===undefined?'GET':'POST',headers:{'X-Token':T,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
@@ -584,6 +620,7 @@ function render(s){S=s;
   $('pos').textContent=s.pos?s.pos[0].toFixed(1)+', '+s.pos[1].toFixed(1)+' mm (estimate)':'not set';
   $('penz').textContent='Z'+s.pen_z;$('upz').textContent='Z'+s.pen_up_z;$('downz').textContent='Z'+s.pen_down_z;
   $('paper').textContent=s.paper_size;$('papersrc').textContent=s.paper_source==='file'?'(from the loaded file)':'(from profile; file has no page size)';if(!tickSet){$('tickmm').value=s.tick_mm;tickSet=true}
+  if(!settleSet){$('settle').value=s.pen_settle_s;settleSet=true}
   $('file').textContent=s.file||'none';$('prev').hidden=!s.has_preview;
   const pk=s.has_preview?s.file+'|'+s.layer:'';
   if(pk&&pk!==previewKey){previewKey=pk;$('prev').src='/api/file.svg?token='+T+'&layer='+encodeURIComponent(s.layer)+'&k='+Date.now()}
@@ -609,6 +646,8 @@ $('penup').onclick=()=>act('/api/pen',{z:S.pen_up_z});
 $('pendown').onclick=()=>act('/api/pen',{z:S.pen_down_z});
 $('saveup').onclick=()=>act('/api/save_height',{which:'up'});
 $('savedown').onclick=()=>act('/api/save_height',{which:'down'});
+$('savesettle').onclick=()=>act('/api/settle',{seconds:+$('settle').value||0});
+$('testline').onclick=()=>confirm('Lower the pen and draw a 10 mm line along +X from here?')&&act('/api/test_line',{mm:10});
 $('gozero').onclick=()=>act('/api/goto_zero',{});
 $('zero').onclick=()=>confirm('Set the current pen position as zero (X0 Y0)?')&&act('/api/zero',{});
 $('reg').onclick=()=>confirm('Draw registration marks at the page corners? Check the pen is loaded and the paper is placed.')&&act('/api/registration',{delay:+$('delay').value||0,tick_mm:+$('tickmm').value||2});

@@ -481,3 +481,24 @@ def test_remote_preview_shows_only_the_selected_layer(remote):
     with pytest.raises(urllib.error.HTTPError) as e:
         preview(999)
     assert e.value.code == 404
+
+
+def test_pen_settle_dwell_appears_in_gcode(art):
+    doc = pu.read_document(art)
+    plain = pu.document_to_gcode(doc, pu.MachineProfile())
+    settled = pu.document_to_gcode(doc, pu.MachineProfile(pen_settle_s=0.4))
+    assert not any(l.startswith("G04") for l in plain)
+    i = settled.index("G00 Z6")
+    assert settled[i + 1] == "G04 P0.4"  # dwell right after pen down, before drawing
+    assert settled[settled.index("G00 Z0", i) + 1] == "G04 P0.4"  # and after pen up
+
+
+def test_remote_settle_and_test_line(remote):
+    assert remote.call("/api/settle", {"seconds": 0.4})[1]["pen_settle_s"] == 0.4
+    assert pu.MachineProfile.load(remote.save_path).pen_settle_s == 0.4
+    assert remote.call("/api/settle", {"seconds": 9})[0] == 409
+    remote.conn.sent.clear()
+    assert remote.call("/api/test_line", {})[0] == 200
+    assert remote.conn.sent == ["G90", "G00 Z6", "G04 P0.4", "G91", "G01 X10 F2000", "G90", "G00 Z0", "G04 P0.4"]
+    remote.call("/api/pen", {"z": 6})
+    assert remote.call("/api/test_line", {})[0] == 409  # pen must start up
