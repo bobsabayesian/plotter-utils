@@ -8,7 +8,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from .drawing import registration_ticks_document
+from .drawing import page_size_label, page_size_string, registration_ticks_document, svg_page_size_mm
 from .gcode import document_to_gcode, estimate_plot
 from .gcode_sender import connect, read_gcode
 from .job import wait_with_cancel
@@ -57,6 +57,7 @@ class RemoteControl:
         self.progress = (0, 0)
         self.message = "Ready."
         self.httpd = None
+        self.paper = self._paper_from_file()
         self.cancel = threading.Event()
         self.counting = False  # True during the start delay, before the machine has moved
 
@@ -70,14 +71,26 @@ class RemoteControl:
             "pen_down_z": p.pen_down_z, "pos": self.pos, "zero_set": self.pos is not None,
             "file": os.path.basename(self.file) if self.file else None,
             "has_preview": bool(self.file and self.file.lower().endswith(".svg")),
-            "paper_size": p.paper_size, "tick_length": self.tick_length,
+            "paper_size": page_size_label(*self.paper) if self.paper else p.paper_size,
+            "paper_source": "file" if self.paper else "profile", "tick_length": self.tick_length,
             "z_range": Z_RANGE, "start_delay_s": self.profile.start_delay_s,
         }
+
+    def _paper_from_file(self):
+        """(width_mm, height_mm) the loaded SVG declares, or None (raw G-code, or no size)."""
+        if self.file and self.file.lower().endswith(".svg"):
+            return svg_page_size_mm(self.file)
+        return None
+
+    def paper_string(self):
+        """The paper size registration marks use: the file's, else profile.paper_size."""
+        return page_size_string(*self.paper) if self.paper else self.profile.paper_size
 
     def set_file(self, path):
         if not os.path.exists(path):
             raise FileNotFoundError(path)
         self.file = path
+        self.paper = self._paper_from_file()
         self.message = f"File set: {os.path.basename(path)}"
 
     # ---- actions (each returns after updating self.message) ----------------
@@ -146,7 +159,7 @@ class RemoteControl:
 
     def start_registration(self, delay=None):
         self._require_ready()
-        doc = registration_ticks_document(self.profile.paper_size, self.tick_length)
+        doc = registration_ticks_document(self.paper_string(), self.tick_length)
         self._start_job("registration marks", document_to_gcode(doc, self.profile), delay=delay)
 
     def start_plot(self, delay=None):
@@ -394,7 +407,7 @@ img{max-width:100%;border:1px solid var(--line);border-radius:8px;background:#ff
 <div class="kv">Applies to registration marks and plotting. STOP cancels the countdown.</div></section>
 
 <section><h2>3 · Registration marks</h2>
-<div class="kv">Paper <b id="paper"></b> · tick <b id="tick"></b></div>
+<div class="kv">Paper <b id="paper"></b> <span id="papersrc"></span> · tick <b id="tick"></b></div>
 <button id="reg" style="width:100%">Draw registration marks</button></section>
 
 <section><h2>4 · Plot file</h2>
@@ -415,7 +428,7 @@ function render(s){S=s;
   const [d,t]=s.progress;$('bar').firstElementChild.style.width=(s.busy&&t?100*d/t:0)+'%';
   $('pos').textContent=s.pos?s.pos[0].toFixed(1)+', '+s.pos[1].toFixed(1)+' mm (estimate)':'not set';
   $('penz').textContent='Z'+s.pen_z;$('upz').textContent='Z'+s.pen_up_z;$('downz').textContent='Z'+s.pen_down_z;
-  $('paper').textContent=s.paper_size;$('tick').textContent=s.tick_length;
+  $('paper').textContent=s.paper_size;$('papersrc').textContent=s.paper_source==='file'?'(from the loaded file)':'(from profile; file has no page size)';$('tick').textContent=s.tick_length;
   $('file').textContent=s.file||'none';$('prev').hidden=!s.has_preview;
   if(s.has_preview&&!$('prev').src)$('prev').src='/api/file.svg?token='+T;
   for(const b of document.querySelectorAll('button:not(#stop)'))b.disabled=!!s.busy;

@@ -4,6 +4,7 @@ __all__ = [
     "PAPER_SIZE_GROUPS", "page_size_mm", "paper_size_table", "format_paper_sizes",
     "registration_ticks_document", "write_svg", "write_registration_ticks",
     "preview_svg", "generate_registration_ticks", "print_paper_sizes",
+    "svg_page_size_mm", "page_size_label", "page_size_string",
 ]
 
 # ==============================================================================
@@ -49,6 +50,55 @@ def page_size_mm(paper_size):
     w, h = vpype.convert_page_size(paper_size.lower())
     mm = vpype.convert_length("1mm")
     return w / mm, h / mm
+
+
+def svg_page_size_mm(path):
+    """
+    Returns the page (width, height) in mm that an SVG declares, from its root
+    width/height (any CSS unit) or, failing that, its viewBox (user units = px).
+    Returns None if it declares neither. Reads only the root tag, so it is fast on big files.
+    """
+    import xml.etree.ElementTree as ET
+    for _, root in ET.iterparse(path, events=("start",)):
+        break  # the first start event is the <svg> root
+    mm = vpype.convert_length("1mm")
+
+    def length(value):
+        if not value or value.strip().endswith("%"):
+            return None
+        try:
+            return vpype.convert_length(value.strip())
+        except ValueError:
+            return None
+
+    w, h = length(root.get("width")), length(root.get("height"))
+    if w is None or h is None:
+        try:
+            _, _, vw, vh = (float(v) for v in root.get("viewBox", "").replace(",", " ").split())
+            w, h = vw, vh
+        except ValueError:
+            return None
+    return w / mm, h / mm
+
+
+def page_size_label(width_mm, height_mm):
+    """
+    A human-readable name for a size: the standard name if it matches one (either
+    orientation, within 1 mm), else e.g. "500.0x700.0mm". For display only; to build
+    geometry use page_size_string(), which keeps the exact orientation.
+    """
+    for name in ("a0", "a1", "a2", "a3", "a4", "a5", "a6", "letter", "legal", "tabloid", "executive"):
+        sw, sh = page_size_mm(name)
+        if (abs(sw - width_mm) < 1 and abs(sh - height_mm) < 1) or (abs(sw - height_mm) < 1 and abs(sh - width_mm) < 1):
+            return name if abs(sw - width_mm) < 1 else f"{name} (landscape)"
+    return f"{width_mm:.1f}x{height_mm:.1f}mm"
+
+
+def page_size_string(width_mm, height_mm):
+    """
+    An exact vpype page-size string, e.g. "594.00x841.00mm".
+    """
+    return f"{width_mm:.2f}x{height_mm:.2f}mm"
 
 
 def paper_size_table():

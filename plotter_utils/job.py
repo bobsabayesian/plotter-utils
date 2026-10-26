@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, field
 
 import vpype
 
-from .drawing import write_registration_ticks
+from .drawing import page_size_string, svg_page_size_mm, write_registration_ticks
 from .gcode import document_to_gcode, estimate_plot
 from .layers import read_document
 from .optimize import optimization_report, optimize_document
@@ -71,13 +71,19 @@ class Job:
             return cls([Step.from_dict(d) for d in json.load(f)])
 
 
-def build_layer_job(layers, paper_size="a1", tick_length="2mm", registration_file="registration.svg", optimize=True):
+def build_layer_job(layers, paper_size=None, tick_length="2mm", registration_file="registration.svg", optimize=True):
     """
     Builds the standard per-layer job from split_layers() output: for each layer,
     draw registration ticks, prompt for paper and pen, preview, approve, plot.
+    paper_size defaults to the page size declared by the layer files (i.e. your SVG).
     With optimize=True an optimize step runs first and the preview/plot use the
     optimized copy (<layer>.opt.svg).
     """
+    if paper_size is None:  # take the page size from the artwork itself
+        size = svg_page_size_mm(layers[0].filename) if layers else None
+        if size is None:
+            raise ValueError("The SVG declares no page size; pass paper_size, e.g. paper_size='a1'")
+        paper_size = page_size_string(*size)
     steps = []
     for layer in layers:
         plot_file = layer.filename

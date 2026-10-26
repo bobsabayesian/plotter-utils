@@ -118,7 +118,7 @@ import plotter_utils as pu
 
 profile = pu.MachineProfile()                       # defaults; see MachineProfile reference
 layers  = pu.split_layers("art.svg", group_by_pen=True)
-job     = pu.build_layer_job(layers, profile.paper_size, optimize=True)
+job     = pu.build_layer_job(layers, optimize=True)   # paper size comes from the SVG
 job.save("jobfiles/art.steps.json")
 
 pu.job_stepper(job, pu.JobContext(profile))         # DRY RUN: writes .gcode files, moves nothing
@@ -244,6 +244,8 @@ the user only through `ctx.frontend.message(text)` / `ctx.frontend.preview(svg_p
 | Function | Description |
 |---|---|
 | `page_size_mm(size)` | `(w, h)` in mm for `"a1"` or a custom `"24x36in"`. |
+| `svg_page_size_mm(path)` | `(w, h)` in mm that an SVG declares (width/height, else viewBox); `None` if neither. |
+| `page_size_label(w, h)` / `page_size_string(w, h)` | Display name (`"a1"`, `"a4 (landscape)"`) / exact vpype size string. |
 | `paper_size_table()` | Paper-size guide as a list of dicts. |
 | `format_paper_sizes()` | The guide as text. |
 | `registration_ticks_document(size, tick_length)` | Corner tick marks as a `vpype.Document`. |
@@ -329,7 +331,7 @@ switch to unbuffered first.
 |---|---|
 | `Step(action, params)` | One step. `to_dict()` / `from_dict()` flatten params next to `action`. |
 | `Job(steps)` | `.save(path)` / `Job.load(path)` JSON. |
-| `build_layer_job(layers, paper_size, tick_length, registration_file, optimize=True)` | The standard per-layer sequence (below). |
+| `build_layer_job(layers, paper_size=None, tick_length, registration_file, optimize=True)` | The standard per-layer sequence (below). `paper_size=None` takes the page size from the SVG; pass a string to override. |
 | `register_action(name)` | Decorator adding a step handler. |
 | `ACTIONS` | The registry (`registration`, `user_prompt`, `preview_approval`, `optimize`, `plot`). |
 | `Frontend`, `PrintFrontend` | UI interface and a trivial print implementation. |
@@ -369,7 +371,7 @@ The per-layer sequence from `build_layer_job`:
 | `test_mode` | `True` | No hardware: `connect()` returns a simulator and real connections are refused. Set `False` once the plotter is here. |
 | `port` | `"/dev/ttyACM0"` | Serial device. |
 | `baud` | `115200` | Serial speed. |
-| `paper_size` | `"a1"` | Page size string used when building jobs. |
+| `paper_size` | `"a1"` | Fallback page size, used only when a file declares none (e.g. raw G-code). SVG jobs and the remote page use the file's own page size. |
 | `bed_size_mm` | `None` | `(width, height)` for bounds checking; `None` disables it. Set from `$130/$131` or by measuring. |
 | `pen_up_z` | `0` | Z value (0–9) with the pen lifted. |
 | `pen_down_z` | `6` | Z value with the pen on paper. **Calibrate.** |
@@ -498,7 +500,7 @@ The cell returns immediately; the server runs on a background thread.
 |---|---|
 | **Pen height** | Slider moves the pen to any Z 0–9; **Pen up / Pen down** go to the stored values; **Save this as UP / DOWN** stores the current height in the profile (and in `save_path` if given). |
 | **Position & zero** | Jog X/Y by 1, 5, 10 or 50 mm; **Set zero here** (`G92 X0 Y0`). Shows an estimated position from zero. |
-| **Registration marks** | Draws corner ticks for `profile.paper_size`. |
+| **Registration marks** | Draws corner ticks at the corners of the **loaded file's page size** (read from the SVG; the page shows which). Falls back to `profile.paper_size` for raw G-code files. |
 | **Plot file** | Previews the SVG and plots it (optimized, unless `optimize=False`). A raw `.gcode` file is sent as is. |
 | **STOP** | Always visible. Feed hold + soft reset; position is lost, so set zero again. |
 

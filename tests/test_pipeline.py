@@ -327,3 +327,37 @@ def test_serve_remote_port_taken_by_another_program_gives_a_clear_error():
             pu.serve_remote(pu.MachineProfile(), host="127.0.0.1", port=blocker.getsockname()[1])
     finally:
         blocker.close()
+
+
+def test_svg_page_size_is_read_from_the_file(art, tmp_path):
+    w, h = pu.svg_page_size_mm(art)
+    assert (round(w), round(h)) == (210, 297)
+    assert pu.page_size_label(w, h) == "a4"
+    assert pu.page_size_label(297, 210) == "a4 (landscape)"
+    assert pu.page_size_label(500, 700) == "500.0x700.0mm"
+    viewbox_only = tmp_path / "v.svg"
+    viewbox_only.write_text('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 192"/>')
+    assert pu.svg_page_size_mm(str(viewbox_only)) == pytest.approx((25.4, 50.8))
+    none = tmp_path / "n.svg"
+    none.write_text('<svg xmlns="http://www.w3.org/2000/svg" width="100%"/>')
+    assert pu.svg_page_size_mm(str(none)) is None
+
+
+def test_job_paper_size_comes_from_the_file(art, tmp_path):
+    layers = pu.split_layers(art, output_dir=str(tmp_path / "out"))
+    def reg_size(job):
+        return next(s for s in job.steps if s.action == "registration").params["size"]
+
+    assert reg_size(pu.build_layer_job(layers)) == "210.00x297.00mm"
+    assert reg_size(pu.build_layer_job(layers, "a3")) == "a3"  # explicit still wins
+
+
+def test_remote_registration_uses_the_loaded_files_paper(remote):
+    state = remote.call("/api/state")[1]
+    assert state["paper_size"] == "a4" and state["paper_source"] == "file"
+    remote.profile.paper_size = "a1"  # profile says A1, file says A4: file must win
+    remote.call("/api/zero", {})
+    assert remote.call("/api/registration", {})[0] == 200  # would exceed the A4 bed if A1 were used
+    remote.wait_idle()
+    xs = [float(l.split("X")[1].split()[0]) for l in remote.conn.sent if l.startswith("G0") and " X" in l and "Y" in l]
+    assert max(xs) == pytest.approx(210, abs=0.1)
