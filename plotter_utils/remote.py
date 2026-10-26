@@ -282,6 +282,11 @@ class RemoteControl:
     def url(self):
         return f"http://{_lan_ip()}:{self.port}/?token={self.token}"
 
+    def url_by_name(self):
+        """Same link using <hostname>.local, which survives a changing IP (mDNS; works on Pi OS)."""
+        name = socket.gethostname().split(".")[0]
+        return f"http://{name}.local:{self.port}/?token={self.token}"
+
     def shutdown(self):
         if self.httpd:
             self.httpd.shutdown()
@@ -329,6 +334,9 @@ def serve_remote(profile, file=None, connection=None, host="0.0.0.0", port=8000,
         ) from e
     _ACTIVE.append(remote)
     print(f"Plotter remote ({'TEST MODE' if profile.test_mode else 'LIVE'}): {remote.url()}")
+    print(f"  or by name:  {remote.url_by_name()}")
+    print("  If the page just spins: open the link without ?token=... on the tablet; instant "
+          "'bad token' text = network is fine, a spinner = the tablet can't reach this machine.")
     return remote
 
 
