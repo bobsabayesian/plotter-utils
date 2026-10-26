@@ -40,12 +40,13 @@ drives the notebook stepper today and a GUI later.
 8. [Job file format](#job-file-format)
 9. [Extending: custom steps, backends, frontends](#extending)
 10. [Raw G-code and the laser](#raw-g-code-and-the-laser)
-11. [Building a GUI on this](#building-a-gui-on-this)
-12. [Testing](#testing)
-13. [Troubleshooting](#troubleshooting)
-14. [Design rules](#design-rules)
-15. [Roadmap](#roadmap)
-16. [Repository layout](#repository-layout)
+11. [Remote control from a tablet](#remote-control-from-a-tablet)
+12. [Building a GUI on this](#building-a-gui-on-this)
+13. [Testing](#testing)
+14. [Troubleshooting](#troubleshooting)
+15. [Design rules](#design-rules)
+16. [Roadmap](#roadmap)
+17. [Repository layout](#repository-layout)
 
 ---
 
@@ -344,6 +345,13 @@ The per-layer sequence from `build_layer_job`:
 5. `preview_approval`: show the layer, wait for you
 6. `plot`: draw the layer
 
+### `plotter_utils.remote`
+
+| Name | Description |
+|---|---|
+| `serve_remote(profile, file=None, connection=None, host="0.0.0.0", port=8000, optimize=True, tick_length="2mm", allow_laser=False, save_path=None)` | Start the tablet page on a background thread; returns a `RemoteControl`. Uses a simulated connection in test mode. |
+| `RemoteControl` | `.url()`, `.set_file(path)`, `.stop()` (emergency), `.shutdown()`; its actions mirror the page buttons. |
+
 ### `plotter_utils.notebook`
 
 | Name | Description |
@@ -472,6 +480,52 @@ Laser safety, since there is no laser-aware tooling yet:
 
 ---
 
+## Remote control from a tablet
+
+`serve_remote()` starts a small web page on the Pi so you can run the plotter from an iPad or phone
+standing next to it, while your notebook stays in the other room.
+
+```python
+profile = pu.MachineProfile.load("machine.json")        # test_mode still True? the page runs a simulator
+remote = pu.serve_remote(profile, file="layerfile/00_Red_Box_ff0000.svg", save_path="machine.json")
+# Plotter remote (TEST MODE): http://192.168.4.220:8000/?token=...   <- open this on the tablet
+```
+
+The cell returns immediately; the server runs on a background thread.
+
+| Page section | What it does |
+|---|---|
+| **Pen height** | Slider moves the pen to any Z 0–9; **Pen up / Pen down** go to the stored values; **Save this as UP / DOWN** stores the current height in the profile (and in `save_path` if given). |
+| **Position & zero** | Jog X/Y by 1, 5, 10 or 50 mm; **Set zero here** (`G92 X0 Y0`). Shows an estimated position from zero. |
+| **Registration marks** | Draws corner ticks for `profile.paper_size`. |
+| **Plot file** | Previews the SVG and plots it (optimized, unless `optimize=False`). A raw `.gcode` file is sent as is. |
+| **STOP** | Always visible. Feed hold + soft reset; position is lost, so set zero again. |
+
+Safeguards built in:
+
+- **Token.** The URL carries a random token; every request needs it. That is the only access control,
+  and traffic is plain HTTP, so use it on a trusted home network only. Anyone with the link can move
+  the machine. Restarting `serve_remote` makes a new token.
+- **Order of operations.** Plotting and registration are refused until zero is set; moving needs the
+  pen up; one job runs at a time (a second tap is rejected); only STOP works during a job.
+- **Limits.** Jogs are capped at 100 mm and, once zero is set and `bed_size_mm` is known, are refused
+  if they would leave the bed. Z is limited to 0–9.
+- **Confirmations.** Set zero, registration and plot each ask "are you sure?" on the tablet.
+- **Laser files.** A raw G-code file containing `M3`/`M4` is refused unless you start the server with
+  `allow_laser=True`.
+- **Test mode.** With `profile.test_mode` on, the page drives a `SimulatedConnection`: everything
+  works except the machine moves. Try the page on the tablet like this first. The page shows a
+  TEST MODE / LIVE badge.
+
+Other calls: `remote.set_file("other.svg")` to change the file, `remote.url()` to reprint the link,
+`remote.shutdown()` to stop serving. For live use, `profile.test_mode = False` first.
+
+Limits to know: position is **dead-reckoned** from your jogs (the iDraw has no position feedback
+we read yet), so it is an estimate; and the page was exercised by automated tests against the
+simulator, **not yet on a real iPad or the real machine**.
+
+---
+
 ## Building a GUI on this
 
 The package is shaped so the GUI is a new frontend, not a rewrite:
@@ -566,6 +620,7 @@ plotter_utils/
   gcode_sender.py   GRBL serial connection and raw G-code tools
   job.py            Step/Job plan, action registry, Frontend, JobRunner
   notebook.py       ipywidgets stepper frontend
+  remote.py         tablet web UI: calibrate, jog, zero, registration, plot
 examples/
   workflow.ipynb    end-to-end example notebook
 tests/

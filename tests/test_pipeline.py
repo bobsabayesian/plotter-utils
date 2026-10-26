@@ -156,3 +156,98 @@ def test_job_through_simulated_connection(art, tmp_path, monkeypatch):
     while not runner.done:
         runner.run_next()
     assert any(l.startswith("G01") for l in conn.sent)
+
+
+# ---- remote control page --------------------------------------------------
+
+import json
+import time
+import urllib.error
+import urllib.request
+
+
+@pytest.fixture
+def remote(art, tmp_path):
+    profile = pu.MachineProfile(bed_size_mm=(210, 297), paper_size="a4")
+    r = pu.serve_remote(profile, file=art, host="127.0.0.1", port=0, save_path=str(tmp_path / "m.json"))
+
+    def call(path, body=None, token=None):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{r.port}{path}",
+            data=None if body is None else json.dumps(body).encode(),
+            headers={"X-Token": r.token if token is None else token},
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    def wait_idle():
+        for _ in range(100):
+            if call("/api/state")[1]["busy"] is None:
+                return
+            time.sleep(0.02)
+        raise AssertionError("job never finished")
+
+    r.call, r.wait_idle = call, wait_idle
+    yield r
+    r.shutdown()
+
+
+def test_remote_requires_token(remote):
+    assert remote.call("/api/state", token="wrong")[0] == 403
+    assert remote.call("/api/zero", {}, token="wrong")[0] == 403
+
+
+def test_remote_page_and_state(remote):
+    with urllib.request.urlopen(f"http://127.0.0.1:{remote.port}/?token={remote.token}") as r:
+        assert b"Plotter Remote" in r.read()
+    state = remote.call("/api/state")[1]
+    assert state["test_mode"] and not state["zero_set"] and state["has_preview"]
+
+
+def test_remote_calibrate_and_save(remote):
+    assert remote.call("/api/pen", {"z": 4.5})[1]["pen_z"] == 4.5
+    assert remote.call("/api/save_height", {"which": "down"})[1]["pen_down_z"] == 4.5
+    assert pu.MachineProfile.load(remote.save_path).pen_down_z == 4.5
+    assert remote.call("/api/pen", {"z": 42})[0] == 409  # out of range
+
+
+def test_remote_jog_needs_pen_up_and_respects_bed(remote):
+    remote.call("/api/pen", {"z": 6})
+    assert remote.call("/api/jog", {"dx": 5, "dy": 0})[0] == 409  # pen is down
+    remote.call("/api/pen", {"z": 0})
+    assert remote.call("/api/jog", {"dx": 500, "dy": 0})[0] == 409  # over the jog limit
+    remote.call("/api/zero", {})
+    assert remote.call("/api/jog", {"dx": -5, "dy": 0})[0] == 409  # would leave the bed
+    assert remote.call("/api/jog", {"dx": 10, "dy": 20})[1]["pos"] == [10, 20]
+
+
+def test_remote_plot_requires_zero_then_sends(remote):
+    assert remote.call("/api/plot", {})[0] == 409  # zero not set
+    remote.call("/api/zero", {})
+    assert remote.call("/api/plot", {})[0] == 200
+    remote.wait_idle()
+    assert any(l.startswith("G01") for l in remote.conn.sent)
+    assert remote.call("/api/registration", {})[0] == 200
+    remote.wait_idle()
+    assert remote.call("/api/state")[1]["message"].startswith("Done")
+
+
+def test_remote_stop_loses_position_and_laser_files_refused(remote, tmp_path):
+    remote.call("/api/zero", {})
+    assert remote.call("/api/stop", {})[1]["zero_set"] is False
+    laser = tmp_path / "burn.gcode"
+    laser.write_text("G21\nM4 S500\nG1 X5 Y5\nM5\n")
+    remote.set_file(str(laser))
+    remote.call("/api/zero", {})
+    code, body = remote.call("/api/plot", {})
+    assert code == 409 and "M3/M4" in body["error"]
+
+
+def test_remote_bounds_error_is_a_refusal_not_a_crash(remote):
+    remote.profile.bed_size_mm = (50, 50)
+    remote.call("/api/zero", {})
+    code, body = remote.call("/api/registration", {})
+    assert code == 409 and "outside the bed" in body["error"]
