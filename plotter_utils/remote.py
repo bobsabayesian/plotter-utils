@@ -17,7 +17,7 @@ from .job import wait_with_cancel
 from .layers import read_document
 from .optimize import optimize_document
 
-__all__ = ["RemoteControl", "serve_remote"]
+__all__ = ["RemoteControl", "serve_remote", "qr_svg"]
 
 # Servers started in this process. setdefault keeps the list across %autoreload, so a
 # re-run cell can still find and stop the server it started last time.
@@ -25,6 +25,27 @@ _ACTIVE = globals().setdefault("_ACTIVE", [])
 
 MAX_JOG_MM = 100
 Z_RANGE = (0, 9)
+
+
+def qr_svg(text, scale=6):
+    """
+    Returns a QR code for `text` as an SVG string (black on white with a quiet border,
+    so it scans in dark mode too).
+    """
+    import io
+    import segno
+    buf = io.BytesIO()
+    segno.make(text, error="m").save(buf, kind="svg", scale=scale, border=4,
+                                     dark="#000", light="#fff", xmldecl=False, svgns=True)
+    return buf.getvalue().decode()
+
+
+def _in_notebook():
+    try:
+        from IPython import get_ipython
+        return get_ipython() is not None
+    except ImportError:
+        return False
 
 
 class RemoteError(Exception):
@@ -305,6 +326,16 @@ class RemoteControl:
     def url(self):
         return f"http://{_lan_ip()}:{self.port}/?token={self.token}"
 
+    def qr(self, by_name=False):
+        """
+        Shows the page link as a QR code in a notebook, so a tablet can scan it with
+        its camera instead of you typing the link. Does nothing outside a notebook.
+        """
+        if not _in_notebook():
+            return
+        from IPython.display import SVG, display
+        display(SVG(qr_svg(self.url_by_name() if by_name else self.url())))
+
     def seen(self, n=15, quiet_polls=True):
         """
         Prints the most recent requests that reached this server: time, client IP, path,
@@ -340,7 +371,7 @@ def _lan_ip():
 
 
 def serve_remote(profile, file=None, connection=None, host="0.0.0.0", port=8000, optimize=True,
-                 tick_length="2mm", allow_laser=False, save_path=None):
+                 tick_length="2mm", allow_laser=False, save_path=None, show_qr=True):
     """
     Starts the tablet control page on a background thread and returns the
     RemoteControl (call .shutdown() to stop it, .set_file(path) to change the file).
@@ -370,6 +401,8 @@ def serve_remote(profile, file=None, connection=None, host="0.0.0.0", port=8000,
     _ACTIVE.append(remote)
     print(f"Plotter remote ({'TEST MODE' if profile.test_mode else 'LIVE'}): {remote.url()}")
     print(f"  or by name:  {remote.url_by_name()}")
+    if show_qr:
+        remote.qr()  # scan with the tablet camera; a no-op outside a notebook
     print("  If the page just spins: open the link without ?token=... on the tablet; instant "
           "'bad token' text = network is fine, a spinner = the tablet can't reach this machine.")
     return remote

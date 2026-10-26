@@ -371,3 +371,9 @@ def test_remote_logs_who_connected(remote, capsys):
     assert "127.0.0.1" in out and "/api/zero" in out and "/api/state" not in out
     remote.seen(quiet_polls=False)
     assert "/api/state" in capsys.readouterr().out
+
+
+def test_qr_svg_and_qr_outside_notebook(remote):
+    svg = pu.qr_svg(remote.url())
+    assert svg.startswith("<svg") and "#fff" in svg
+    assert remote.qr() is None  # no notebook under pytest: must be a quiet no-op

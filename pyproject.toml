@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "plotter-utils"
 version = "0.1.0"
 requires-python = ">=3.9"
-dependencies = ["vpype", "pyserial", "ipython", "ipywidgets"]
+dependencies = ["vpype", "pyserial", "ipython", "ipywidgets", "segno"]
 
 [project.optional-dependencies]
 test = ["pytest"]

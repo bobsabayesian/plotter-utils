@@ -352,7 +352,8 @@ The per-layer sequence from `build_layer_job`:
 | Name | Description |
 |---|---|
 | `serve_remote(profile, file=None, connection=None, host="0.0.0.0", port=8000, optimize=True, tick_length="2mm", allow_laser=False, save_path=None)` | Start the tablet page on a background thread; returns a `RemoteControl`. Uses a simulated connection in test mode. |
-| `RemoteControl` | `.url()`, `.seen()`, `.set_file(path)`, `.stop()` (emergency), `.shutdown()`; its actions mirror the page buttons. |
+| `qr_svg(text)` | A QR code as an SVG string. |
+| `RemoteControl` | `.url()`, `.qr()`, `.seen()`, `.set_file(path)`, `.stop()` (emergency), `.shutdown()`; its actions mirror the page buttons. |
 
 ### `plotter_utils.notebook`
 
@@ -520,6 +521,8 @@ Safeguards built in:
 - **Test mode.** With `profile.test_mode` on, the page drives a `SimulatedConnection`: everything
   works except the machine moves. Try the page on the tablet like this first. The page shows a
   TEST MODE / LIVE badge.
+
+`serve_remote` also shows the link as a **QR code** in the notebook; point the tablet's camera at it and tap the banner instead of typing the link. `remote.qr()` shows it again (`by_name=True` for the `.local` link), and `serve_remote(..., show_qr=False)` turns it off.
 
 `remote.seen()` prints the latest requests that reached the server (time, client IP, browser), which is the quickest way to tell whether a tablet is reaching the machine at all.
 
