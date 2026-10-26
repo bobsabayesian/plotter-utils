@@ -449,3 +449,15 @@ def test_layer_helpers():
     assert pu.extract_layer(doc, 5).layers[5].__len__() == 1
     with pytest.raises(KeyError):
         pu.extract_layer(doc, 6)
+
+
+def test_remote_go_to_zero(remote):
+    assert remote.call("/api/goto_zero", {})[0] == 409  # no zero set yet
+    remote.call("/api/zero", {})
+    remote.call("/api/jog", {"dx": 30, "dy": 40})
+    assert remote.call("/api/state")[1]["pos"] == [30, 40]
+    remote.conn.sent.clear()
+    state = remote.call("/api/goto_zero", {})[1]
+    assert state["pos"] == [0, 0] and remote.conn.sent == ["G90", "G01 X0 Y0 F2000"]
+    remote.call("/api/pen", {"z": 6})
+    assert remote.call("/api/goto_zero", {})[0] == 409  # pen is down

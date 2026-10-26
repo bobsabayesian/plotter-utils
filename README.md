@@ -501,7 +501,7 @@ The cell returns immediately; the server runs on a background thread.
 | Page section | What it does |
 |---|---|
 | **Pen height** | Slider moves the pen to any Z 0–9; **Pen up / Pen down** go to the stored values; **Save this as UP / DOWN** stores the current height in the profile (and in `save_path` if given). |
-| **Position & zero** | Jog X/Y by 1, 5, 10 or 50 mm; **Set zero here** (`G92 X0 Y0`). Shows an estimated position from zero. |
+| **Position & zero** | Jog X/Y by 1, 5, 10 or 50 mm; **Set zero here** (`G92 X0 Y0`); **Go to zero** returns the raised pen to that point in a straight line. Shows an estimated position from zero. |
 | **Registration marks** | Draws corner ticks at the corners of the **loaded file's page size** (read from the SVG; the page shows which). The **Tick size (mm)** box (with − / +) sets how far in the diagonal runs, 0.5–50 mm. Falls back to `profile.paper_size` for raw G-code files. |
 | **Layer picker** | For an SVG, lists its layers as `1 · Red · Red box (12 paths)` with a color swatch and which pen to load. **Plot** draws only the selected layer; "All layers (one pen)" draws everything with whatever pen is loaded (the confirm dialog says so). With several layers the picker starts on the first, not "All". When a layer finishes it advances to the next and the status says which pen to swap in. |
 | **Plot** | Previews the SVG and plots the selected layer (optimized, unless `optimize=False`). A raw `.gcode` file is sent as is. |

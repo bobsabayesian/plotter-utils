@@ -210,6 +210,16 @@ class RemoteControl:
         self.pos = (0.0, 0.0)
         self.message = "Zero set here."
 
+    def go_to_zero(self):
+        """Moves the pen (raised) back to the X0 Y0 you set, along a straight line."""
+        if self.pos is None:
+            raise RemoteError("Set zero first; there is no zero point to return to")
+        if self.pen_z != self.profile.pen_up_z:
+            raise RemoteError("Raise the pen before moving")
+        self._run("go to zero", ["G90", f"G01 X0 Y0 F{min(self.profile.draw_feed, 2000):g}"])
+        self.pos = (0.0, 0.0)
+        self.message = "Back at zero."
+
     def _require_ready(self):
         if self.pos is None:
             raise RemoteError("Set zero first (jog the pen to the paper's lower-left corner)")
@@ -360,6 +370,7 @@ class RemoteControl:
                     "/api/save_height": lambda: remote.save_pen_height(body["which"]),
                     "/api/jog": lambda: remote.jog(body["dx"], body["dy"]),
                     "/api/zero": remote.set_zero,
+                    "/api/goto_zero": remote.go_to_zero,
                     "/api/registration": lambda: remote.start_registration(body.get("delay"), body.get("tick_mm")),
                     "/api/layer": lambda: remote.select_layer(body["layer"]),
                     "/api/plot": lambda: remote.start_plot(body.get("delay")),
@@ -516,7 +527,7 @@ img{max-width:100%;border:1px solid var(--line);border-radius:8px;background:#ff
 <span></span><button data-j="0,1">▲ Y+</button><span></span>
 <button data-j="-1,0">◀ X−</button><span></span><button data-j="1,0">X+ ▶</button>
 <span></span><button data-j="0,-1">▼ Y−</button><span></span></div>
-<button id="zero" class="primary" style="width:100%">Set zero here</button>
+<div class="row"><button id="gozero">Go to zero</button><button id="zero" class="primary">Set zero here</button></div>
 <div class="kv">Pen must be up to move. Put the pen at the paper's lower-left corner, then set zero.</div></section>
 
 <section><h2>Start delay</h2>
@@ -578,6 +589,7 @@ $('penup').onclick=()=>act('/api/pen',{z:S.pen_up_z});
 $('pendown').onclick=()=>act('/api/pen',{z:S.pen_down_z});
 $('saveup').onclick=()=>act('/api/save_height',{which:'up'});
 $('savedown').onclick=()=>act('/api/save_height',{which:'down'});
+$('gozero').onclick=()=>act('/api/goto_zero',{});
 $('zero').onclick=()=>confirm('Set the current pen position as zero (X0 Y0)?')&&act('/api/zero',{});
 $('reg').onclick=()=>confirm('Draw registration marks at the page corners? Check the pen is loaded and the paper is placed.')&&act('/api/registration',{delay:+$('delay').value||0,tick_mm:+$('tickmm').value||2});
 $('layer').onchange=e=>act('/api/layer',{layer:e.target.value==='all'?'all':+e.target.value});
