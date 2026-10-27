@@ -602,3 +602,33 @@ def test_remote_rotation_turns_marks_preview_and_plot_and_checks_the_bed(remote)
 
     remote.set_file(remote.file)
     assert remote.call("/api/state")[1]["rotation"] == 0  # loading a file resets it
+
+
+# ---- serial port auto-detect ---------------------------------------------------
+
+def test_resolve_port(monkeypatch, tmp_path, capsys):
+    gs = pu.gcode_sender
+    real = tmp_path / "ttyACM9"
+    real.write_text("")
+    monkeypatch.setattr(gs, "find_ports", lambda: [("/dev/ttyACM1", "USB CDC-Serial")])
+    assert gs.resolve_port(str(real)) == (str(real), "")                      # exists: used as given
+    assert gs.resolve_port("/dev/ttyACM1") == ("/dev/ttyACM1", "")            # a listed device: as given
+    dev, note = gs.resolve_port("/dev/ttyACM0")                                # missing, one candidate
+    assert dev == "/dev/ttyACM1" and "ttyACM0 not found" in note
+
+    monkeypatch.setattr(gs, "find_ports", lambda: [])
+    with pytest.raises(FileNotFoundError, match="no USB serial devices"):
+        gs.resolve_port("/dev/ttyACM0")
+    monkeypatch.setattr(gs, "find_ports", lambda: [("/dev/ttyACM1", "a"), ("/dev/ttyUSB0", "b")])
+    with pytest.raises(FileNotFoundError, match="several candidates"):         # never guesses between two
+        gs.resolve_port("/dev/ttyACM0")
+
+
+def test_connect_uses_the_resolved_port_only_in_live_mode(monkeypatch, capsys):
+    gs = pu.gcode_sender
+    opened = []
+    monkeypatch.setattr(gs, "find_ports", lambda: [("/dev/ttyACM1", "USB CDC-Serial")])
+    monkeypatch.setattr(gs, "GrblConnection", lambda port, baud: opened.append((port, baud)) or "conn")
+    assert pu.connect(pu.MachineProfile(port="/dev/ttyACM0", test_mode=True)).simulated and not opened
+    assert pu.connect(pu.MachineProfile(port="/dev/ttyACM0", test_mode=False)) == "conn"
+    assert opened == [("/dev/ttyACM1", 115200)] and "using the only USB serial device" in capsys.readouterr().out

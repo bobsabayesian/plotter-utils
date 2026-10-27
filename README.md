@@ -302,6 +302,7 @@ G00 X0 Y0
 | Name | Description |
 |---|---|
 | `find_ports()` | Likely USB serial devices `(device, description)`. |
+| `resolve_port(port)` | `(device, note)`: the port as given if it exists, else the only attached USB serial device (with a note), else a clear error. Never guesses between several. `connect()` uses it. |
 | `read_gcode(file)`, `clean_gcode_line(l)` | Load a file, stripping `;` and `( )` comments and blank lines. |
 | `check_gcode(file)` | Dry summary: line count, laser/spindle use (`M3`/`M4`), XY extents. |
 | `connect(profile)` | The connection factory: `SimulatedConnection` when `profile.test_mode`, else `GrblConnection`. |
@@ -580,6 +581,8 @@ against a pty that stands in for the controller. None of it needs hardware.
 
 | Symptom | Likely cause / fix |
 |---|---|
+| `FileNotFoundError ... no USB serial devices detected` | The plotter isn't visible to this machine: check power, use a data-capable USB cable, and make sure Jupyter is on the machine it is plugged into. `ls /dev/ttyACM* /dev/ttyUSB*` and `dmesg \| tail` show what the OS sees. |
+| Port number keeps changing (`ttyACM0` -> `ttyACM1`) | It re-enumerates on replug, especially if an old kernel still holds the port. `connect()` finds the only device automatically; for a name that never changes use the `/dev/serial/by-id/...` path from `ls -l /dev/serial/by-id/` as `profile.port`. |
 | `PermissionError: /dev/ttyACM0` | Add yourself to `dialout`, re-login. |
 | `import vpype` fails or pip installs vpype 1.9 | Python too new; use 3.11/3.12 in the venv. |
 | `GrblError: No response from controller` | Wrong port/baud, board not GRBL, or a very long move; try `buffered=False`. |

@@ -1,3 +1,4 @@
+import os
 import re
 import time
 from collections import deque
@@ -6,7 +7,7 @@ import serial
 from serial.tools import list_ports
 
 __all__ = [
-    "GrblConnection", "SimulatedConnection", "connect", "GrblError", "find_ports", "read_gcode", "check_gcode",
+    "GrblConnection", "SimulatedConnection", "connect", "resolve_port", "GrblError", "find_ports", "read_gcode", "check_gcode",
     "clean_gcode_line", "DEFAULT_BAUD",
 ]
 
@@ -29,7 +30,30 @@ def find_ports():
     """
     Lists serial ports that look like USB devices, as (device, description) pairs.
     """
-    return [(p.device, p.description) for p in list_ports.comports() if "USB" in (p.hwid or "") or "ACM" in p.device]
+    return [(p.device, p.description) for p in list_ports.comports()
+            if "USB" in (p.hwid or "") or "ACM" in p.device or "ttyUSB" in p.device]
+
+
+def resolve_port(port):
+    """
+    Returns (device, note) for the serial port to open. If `port` exists it is used as
+    given (note is ""). If it doesn't (the plotter re-enumerated as /dev/ttyACM1 after a
+    replug, say) and exactly one USB serial device is attached, that one is used and
+    the note says so. It never guesses between several: that raises with the list,
+    because opening the wrong device could drive the wrong hardware.
+    """
+    found = find_ports()
+    if os.path.exists(port) or port in [d for d, _ in found]:
+        return port, ""
+    if len(found) == 1:
+        return found[0][0], f"{port} not found; using the only USB serial device, {found[0][0]} ({found[0][1]})."
+    if not found:
+        raise FileNotFoundError(
+            f"No serial port at {port} and no USB serial devices detected. Check the plotter's power and "
+            f"USB cable (use a data cable), and that this machine is the one it is plugged into."
+        )
+    options = ", ".join(f"{d} ({desc})" for d, desc in found)
+    raise FileNotFoundError(f"No serial port at {port}, and several candidates exist: {options}. Set profile.port to one.")
 
 
 def clean_gcode_line(line):
@@ -82,6 +106,7 @@ class GrblConnection:
     """
 
     def __init__(self, port, baud=DEFAULT_BAUD, timeout=1.0):
+        self.port = port
         self.ser = serial.Serial(port, baud, timeout=timeout)
         self._stopped = False
         self._wake()
@@ -274,8 +299,12 @@ def connect(profile):
     """
     The one place a connection is made. With profile.test_mode (the default) it returns
     a SimulatedConnection and never touches a serial port; otherwise it opens the
-    real GrblConnection on profile.port.
+    real GrblConnection on profile.port. If that port doesn't exist but exactly one USB
+    serial device is attached, it uses that one and prints which (see resolve_port).
     """
     if profile.test_mode:
         return SimulatedConnection()
-    return GrblConnection(profile.port, profile.baud)
+    port, note = resolve_port(profile.port)
+    if note:
+        print(note)
+    return GrblConnection(port, profile.baud)
