@@ -16,7 +16,7 @@ import vpype
 from .drawing import (page_size_label, page_size_string, registration_ticks_svg, rotate_document,
                       svg_page_size_mm)
 from .gcode import document_to_gcode, estimate_plot
-from .gcode_sender import connect, read_gcode
+from .gcode_sender import GrblStopped, connect, read_gcode
 from .job import wait_with_cancel
 from .layers import extract_layer, layer_summaries, read_document
 from .optimize import optimize_document
@@ -370,9 +370,11 @@ class RemoteControl:
                 self.message = f"Done: {name}."
                 if on_done:
                     on_done()
-            except Exception as e:  # includes GrblError from stop/alarm
+            except GrblStopped:  # the STOP button: its own message is already set, so don't overwrite it
                 self.pos, self.pen_z = None, self.profile.pen_up_z
-                self.message = f"Stopped: {e}. Position lost; set zero again."
+            except Exception as e:  # a controller error or alarm
+                self.pos, self.pen_z = None, self.profile.pen_up_z
+                self.message = f"Plot failed: {e}. Position lost; set zero again."
             finally:
                 self._release()
 
@@ -384,9 +386,9 @@ class RemoteControl:
         if self.counting:  # still in the start delay: the machine hasn't moved, so nothing is lost
             self.message = "Cancelled before the plot started."
             return
-        self.conn.stop()
         self.pos = None
-        self.message = "STOPPED. Position lost; set zero again."
+        self.message = "STOPPED. Position lost: raise the pen, jog to the paper's corner and set zero again."
+        self.conn.stop()
 
     # ---- server ------------------------------------------------------------
 

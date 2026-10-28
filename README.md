@@ -308,7 +308,8 @@ G00 X0 Y0
 | `connect(profile)` | The connection factory: `SimulatedConnection` when `profile.test_mode`, else `GrblConnection`. |
 | `SimulatedConnection()` | Hardware-free stand-in with the same methods; records lines in `.sent`. |
 | `GrblConnection(port, baud=115200)` | Context-manager serial connection (see below). |
-| `GrblError` | Raised on `error:N`, `ALARM:N`, a stop, or a long silence. |
+| `GrblError` | Raised on `error:N`, `ALARM:N` (with a plain-language meaning added, see `explain_grbl`), or a long silence. |
+| `GrblStopped` | A `GrblError` subclass raised when a job is stopped on purpose (`stop()` / the STOP button), so you can tell a stop from a fault. |
 
 `GrblConnection` methods:
 
@@ -583,6 +584,7 @@ against a pty that stands in for the controller. None of it needs hardware.
 |---|---|
 | `FileNotFoundError ... no USB serial devices detected` | The plotter isn't visible to this machine: check power, use a data-capable USB cable, and make sure Jupyter is on the machine it is plugged into. `ls /dev/ttyACM* /dev/ttyUSB*` and `dmesg \| tail` show what the OS sees. |
 | Port number keeps changing (`ttyACM0` -> `ttyACM1`) | It re-enumerates on replug, especially if an old kernel still holds the port. `connect()` finds the only device automatically; for a name that never changes use the `/dev/serial/by-id/...` path from `ls -l /dev/serial/by-id/` as `profile.port`. |
+| After STOP, the next move fails with `error:9` / the board seems locked | Resetting mid-move leaves GRBL in an alarm state (`ALARM:3`, "reset while moving"). It refuses G-code until unlocked: run `remote.conn.unlock()` (sends `$X`) or `g.unlock()`, then jog and set zero again. The STOP button itself reports "STOPPED. Position lost…" and nothing else. |
 | `PermissionError: /dev/ttyACM0` | Add yourself to `dialout`, re-login. |
 | `import vpype` fails or pip installs vpype 1.9 | Python too new; use 3.11/3.12 in the venv. |
 | `GrblError: No response from controller` | Wrong port/baud, board not GRBL, or a very long move; try `buffered=False`. |

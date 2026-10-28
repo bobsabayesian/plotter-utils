@@ -632,3 +632,76 @@ def test_connect_uses_the_resolved_port_only_in_live_mode(monkeypatch, capsys):
     assert pu.connect(pu.MachineProfile(port="/dev/ttyACM0", test_mode=True)).simulated and not opened
     assert pu.connect(pu.MachineProfile(port="/dev/ttyACM0", test_mode=False)) == "conn"
     assert opened == [("/dev/ttyACM1", 115200)] and "using the only USB serial device" in capsys.readouterr().out
+
+
+# ---- STOP ---------------------------------------------------------------------
+
+def test_explain_grbl_codes():
+    assert "reset while the machine was moving" in pu.explain_grbl("ALARM:3")
+    assert "unlocked" in pu.explain_grbl("error:9")
+    assert pu.explain_grbl("error:999") == "error:999"  # unknown codes pass through
+
+
+def test_stop_mid_send_is_a_stop_not_an_alarm_error(monkeypatch):
+    """After STOP the controller answers the reset with ALARM:3; that must not surface as a fault."""
+    monkeypatch.setattr(pu.gcode_sender.time, "sleep", lambda s: None)
+
+    class FakeSer:
+        def __init__(self):
+            self.written, self.reads = [], 0
+        def write(self, b):
+            self.written.append(b)
+        def reset_input_buffer(self):
+            pass
+        def readline(self):
+            self.reads += 1
+            if self.reads == 2:
+                conn.stop()              # the STOP button, pressed while a line is awaiting its 'ok'
+                return b"ALARM:3\r\n"   # what a reset mid-move produces
+            return b"ok\r\n"
+
+    conn = pu.GrblConnection.__new__(pu.GrblConnection)
+    conn.ser, conn._stopped, conn.port = FakeSer(), False, "fake"
+    with pytest.raises(pu.GrblStopped):
+        conn.send_lines(["G0 X1"] * 5, buffered=False)
+    assert conn.ser.written.count(b"\x18") == 1  # reset sent once, not repeated by the error path
+
+
+def test_a_real_controller_error_still_reports_its_meaning(fake_grbl):
+    conn, _ = fake_grbl
+    with pytest.raises(pu.GrblError) as e:
+        conn.send_lines(["G0 X1", "BAD"])      # the fake answers error:20 to lines containing BAD
+    assert "unsupported or invalid" in str(e.value) and not isinstance(e.value, pu.GrblStopped)
+
+
+def test_remote_stop_during_a_plot_keeps_a_clean_message(art):
+    import time as _time
+
+    class SlowSim(pu.SimulatedConnection):
+        def send_lines(self, lines, buffered=True, on_progress=None):
+            self._stopped = False
+            for line in lines:
+                if self._stopped:
+                    raise pu.GrblStopped("Stopped")
+                _time.sleep(0.01)
+
+    r = pu.serve_remote(pu.MachineProfile(), file=art, connection=SlowSim(), host="127.0.0.1", port=0)
+    try:
+        def call(path, body=None):
+            req = urllib.request.Request(f"http://127.0.0.1:{r.port}{path}", data=None if body is None else json.dumps(body).encode(),
+                                         headers={"X-Token": r.token})
+            with urllib.request.urlopen(req) as resp:
+                return json.loads(resp.read())
+        call("/api/zero", {})
+        call("/api/plot", {})
+        _time.sleep(0.05)
+        state = call("/api/stop", {})
+        assert state["zero_set"] is False
+        for _ in range(100):
+            if call("/api/state")["busy"] is None:
+                break
+            _time.sleep(0.02)
+        message = call("/api/state")["message"]
+        assert message.startswith("STOPPED") and "ALARM" not in message and "error" not in message.lower()
+    finally:
+        r.shutdown()
