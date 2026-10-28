@@ -510,6 +510,7 @@ The cell returns immediately; the server runs on a background thread.
 | **Rotate** | For an SVG, turns the drawing 0 / 90 / 180 / 270° **clockwise**, the same as turning the paper. The preview, the plot, the registration marks and the paper-size readout all follow (a landscape page becomes portrait). If the rotated page doesn't fit `bed_size_mm`, plotting is refused before anything moves. Rotation resets when you load another file. |
 | **Layer picker** | For an SVG, lists its layers as `1 · Red · Red box (12 paths)` with a color swatch and which pen to load. **Plot** draws only the selected layer; "All layers (one pen)" draws everything with whatever pen is loaded (the confirm dialog says so). With several layers the picker starts on the first, not "All". When a layer finishes it advances to the next and the status says which pen to swap in. |
 | **Plot** | Previews the SVG (just the selected layer, at its place on the page, when you pick one) and plots the selected layer (optimized, unless `optimize=False`). A raw `.gcode` file is sent as is. |
+| **Unlock machine** | In the Status section: sends `$X` (after a confirmation) to clear the controller's alarm lock, which a STOP mid-move often leaves behind. Not available while a job runs. Position stays unknown, so jog and set zero afterwards. A "locked" (`error:9`) refusal on any move now tells you to press it. |
 | **STOP** | Always visible. Feed hold + soft reset; position is lost, so set zero again. |
 
 Safeguards built in:
@@ -584,7 +585,7 @@ against a pty that stands in for the controller. None of it needs hardware.
 |---|---|
 | `FileNotFoundError ... no USB serial devices detected` | The plotter isn't visible to this machine: check power, use a data-capable USB cable, and make sure Jupyter is on the machine it is plugged into. `ls /dev/ttyACM* /dev/ttyUSB*` and `dmesg \| tail` show what the OS sees. |
 | Port number keeps changing (`ttyACM0` -> `ttyACM1`) | It re-enumerates on replug, especially if an old kernel still holds the port. `connect()` finds the only device automatically; for a name that never changes use the `/dev/serial/by-id/...` path from `ls -l /dev/serial/by-id/` as `profile.port`. |
-| After STOP, the next move fails with `error:9` / the board seems locked | Resetting mid-move leaves GRBL in an alarm state (`ALARM:3`, "reset while moving"). It refuses G-code until unlocked: run `remote.conn.unlock()` (sends `$X`) or `g.unlock()`, then jog and set zero again. The STOP button itself reports "STOPPED. Position lost…" and nothing else. |
+| After STOP, the next move fails with `error:9` / the board seems locked | Resetting mid-move leaves GRBL in an alarm state (`ALARM:3`, "reset while moving"). It refuses G-code until unlocked: press **Unlock machine** on the page (or run `remote.conn.unlock()` / `g.unlock()`, which send `$X`), then jog and set zero again. The STOP button itself reports "STOPPED. Position lost…" and nothing else. |
 | `PermissionError: /dev/ttyACM0` | Add yourself to `dialout`, re-login. |
 | `import vpype` fails or pip installs vpype 1.9 | Python too new; use 3.11/3.12 in the venv. |
 | `GrblError: No response from controller` | Wrong port/baud, board not GRBL, or a very long move; try `buffered=False`. |

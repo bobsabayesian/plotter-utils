@@ -705,3 +705,30 @@ def test_remote_stop_during_a_plot_keeps_a_clean_message(art):
         assert message.startswith("STOPPED") and "ALARM" not in message and "error" not in message.lower()
     finally:
         r.shutdown()
+
+
+def test_remote_unlock(remote):
+    remote.conn.sent.clear()
+    state = remote.call("/api/unlock", {})[1]
+    assert remote.conn.sent == ["$X"] and state["message"].startswith("Unlocked")
+    remote.call("/api/zero", {})
+    remote.call("/api/plot", {"delay": 5})
+    assert remote.call("/api/unlock", {})[0] == 409  # busy: not while a job is pending
+    remote.call("/api/stop", {})
+    remote.wait_idle()
+
+
+def test_remote_locked_controller_error_says_to_press_unlock(art):
+    class Locked(pu.SimulatedConnection):
+        def send_lines(self, lines, buffered=True, on_progress=None):
+            raise pu.GrblError(pu.explain_grbl("error:9") + " (in response to 'G00 Z0')")
+
+    r = pu.serve_remote(pu.MachineProfile(), file=art, connection=Locked(), host="127.0.0.1", port=0)
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{r.port}/api/pen", data=b'{"z": 3}', headers={"X-Token": r.token})
+        with pytest.raises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(req)
+        body = json.loads(e.value.read())
+        assert e.value.code == 409 and "Press Unlock" in body["error"] and "locked" in body["error"]
+    finally:
+        r.shutdown()

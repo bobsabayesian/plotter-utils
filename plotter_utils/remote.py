@@ -16,7 +16,7 @@ import vpype
 from .drawing import (page_size_label, page_size_string, registration_ticks_svg, rotate_document,
                       svg_page_size_mm)
 from .gcode import document_to_gcode, estimate_plot
-from .gcode_sender import GrblStopped, connect, read_gcode
+from .gcode_sender import GrblError, GrblStopped, connect, read_gcode
 from .job import wait_with_cancel
 from .layers import extract_layer, layer_summaries, read_document
 from .optimize import optimize_document
@@ -275,6 +275,12 @@ class RemoteControl:
             self.pos = (self.pos[0] + dx, self.pos[1] + dy)
         self.message = f"Jogged {dx:g}, {dy:g} mm"
 
+    def unlock(self):
+        """Clears the controller's alarm lock ($X), e.g. after STOP. Position is still unknown."""
+        self._run("unlock", ["$X"])
+        self.message = ("Unlocked. Raise the pen, jog to the paper's corner and set zero again."
+                        if self.pos is None else "Unlocked.")
+
     def set_zero(self):
         self._run("zero", ["G92 X0 Y0"])
         self.pos = (0.0, 0.0)
@@ -387,7 +393,8 @@ class RemoteControl:
             self.message = "Cancelled before the plot started."
             return
         self.pos = None
-        self.message = "STOPPED. Position lost: raise the pen, jog to the paper's corner and set zero again."
+        self.message = ("STOPPED. Position lost. If moves are refused, press Unlock; then raise the pen, "
+                        "jog to the paper's corner and set zero again.")
         self.conn.stop()
 
     # ---- server ------------------------------------------------------------
@@ -449,6 +456,7 @@ class RemoteControl:
                     "/api/jog": lambda: remote.jog(body["dx"], body["dy"]),
                     "/api/settle": lambda: remote.set_settle(body["seconds"]),
                     "/api/test_line": lambda: remote.draw_test_line(body.get("mm", 10)),
+                    "/api/unlock": remote.unlock,
                     "/api/zero": remote.set_zero,
                     "/api/goto_zero": remote.go_to_zero,
                     "/api/registration": lambda: remote.start_registration(body.get("delay"), body.get("tick_mm")),
@@ -465,6 +473,10 @@ class RemoteControl:
                 except (RemoteError, ValueError) as e:  # ValueError: bounds check in gcode generation
                     remote.message = str(e)
                     self._send(409, {"error": str(e)})
+                except GrblError as e:  # the controller refused a command
+                    text = str(e) + (" Press Unlock." if "error:9" in str(e) else "")
+                    remote.message = text
+                    self._send(409, {"error": text})
                 except Exception as e:
                     remote.message = f"Error: {e}"
                     self._send(500, {"error": str(e)})
@@ -593,7 +605,8 @@ img{max-width:100%;border:1px solid var(--line);border-radius:8px;background:#ff
 </style></head><body>
 <header><h1>Plotter Remote</h1><span id="mode" class="badge"></span></header>
 <section><h2>Status</h2><div id="msg">…</div><div id="bar"><i></i></div>
-<div class="kv">Position from zero: <b id="pos">not set</b></div></section>
+<div class="kv">Position from zero: <b id="pos">not set</b></div>
+<button id="unlock" style="width:100%;margin-top:8px">Unlock machine (after a stop or alarm)</button></section>
 
 <section><h2>1 · Pen height</h2>
 <div class="kv">Now: <b id="penz"></b> · Up value: <b id="upz"></b> · Down value: <b id="downz"></b></div>
@@ -686,6 +699,7 @@ $('saveup').onclick=()=>act('/api/save_height',{which:'up'});
 $('savedown').onclick=()=>act('/api/save_height',{which:'down'});
 $('savesettle').onclick=()=>act('/api/settle',{seconds:+$('settle').value||0});
 $('testline').onclick=()=>confirm('Lower the pen and draw a 10 mm line along +X from here?')&&act('/api/test_line',{mm:10});
+$('unlock').onclick=()=>confirm('Clear the alarm lock ($X)? Check that nothing is jammed and the machine is clear first.')&&act('/api/unlock',{});
 $('gozero').onclick=()=>act('/api/goto_zero',{});
 $('zero').onclick=()=>confirm('Set the current pen position as zero (X0 Y0)?')&&act('/api/zero',{});
 $('reg').onclick=()=>confirm('Draw registration marks at the page corners? Check the pen is loaded and the paper is placed.')&&act('/api/registration',{delay:+$('delay').value||0,tick_mm:+$('tickmm').value||2});
