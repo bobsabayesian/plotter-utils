@@ -13,8 +13,8 @@ from urllib.parse import parse_qs, urlparse
 
 import vpype
 
-from .drawing import (page_size_label, page_size_string, registration_ticks_svg, rotate_document,
-                      svg_page_size_mm)
+from .drawing import (bounding_box_document, document_to_svg_text, page_size_label, page_size_string,
+                      registration_ticks_svg, rotate_document, svg_page_size_mm)
 from .gcode import document_to_gcode, estimate_plot
 from .gcode_sender import GrblError, GrblStopped, connect, read_gcode
 from .job import wait_with_cancel
@@ -86,6 +86,7 @@ class RemoteControl:
         self.httpd = None
         self.rotation = 0  # degrees clockwise: 0, 90, 180, 270
         self.paper = self._paper_from_file()
+        self.art_mm = None       # (width, height) mm of the drawn paths, after rotation
         self.layers = []         # LayerSummary list for the loaded SVG
         self.layer_sel = "all"   # a layer id, or "all"
         self._load_layers()
@@ -108,6 +109,7 @@ class RemoteControl:
             "layers": [{"id": l.id, "name": l.name, "pen": l.pen, "hex": l.hex_color, "paths": l.paths}
                        for l in self.layers],
             "layer": self.layer_sel, "rotation": self.rotation,
+            "paper_mm": self.paper, "art_mm": self.art_mm,
             "z_range": Z_RANGE, "start_delay_s": self.profile.start_delay_s,
         }
 
@@ -141,6 +143,16 @@ class RemoteControl:
         if self.file and self.file.lower().endswith(".svg"):
             self.layers = layer_summaries(read_document(self.file), self.profile.pens)
         self.layer_sel = self.layers[0].id if len(self.layers) > 1 else "all"
+        self._measure_art()
+
+    def _measure_art(self):
+        """Caches the size of the drawn paths (all layers, rotated), so polling the state stays cheap."""
+        self.art_mm = None
+        if self.file and self.file.lower().endswith(".svg"):
+            bounds = self._view_document("all").bounds()
+            if bounds is not None:
+                mm = vpype.convert_length("1mm")
+                self.art_mm = ((bounds[2] - bounds[0]) / mm, (bounds[3] - bounds[1]) / mm)
 
     def preview_svg(self, layer="all"):
         """
@@ -173,6 +185,7 @@ class RemoteControl:
             raise RemoteError("Rotation must be 0, 90, 180 or 270")
         self.rotation = degrees
         self.paper = self._paper_from_file()
+        self._measure_art()
         self.message = f"Rotated {degrees}° clockwise." if degrees else "Not rotated."
 
     def select_layer(self, layer):
@@ -301,6 +314,24 @@ class RemoteControl:
             raise RemoteError("Set zero first (jog the pen to the paper's lower-left corner)")
         if self.pen_z != self.profile.pen_up_z:
             raise RemoteError("Raise the pen first")
+
+    def start_outline(self, which="page", delay=None):
+        """Draws a rectangle for the paper edge ("page") or the artwork's bounds ("art"), at the
+        file's position and rotation, so you can mark where the paper goes (e.g. in dry erase)."""
+        self._require_ready()
+        if not (self.file and self.file.lower().endswith(".svg")):
+            raise RemoteError("An outline needs an SVG file loaded")
+        try:
+            box = bounding_box_document(self._view_document("all"), which)
+        except ValueError as e:
+            raise RemoteError(str(e))
+        # Same route as any SVG, held in memory: no file is written
+        doc = read_document(io.StringIO(document_to_svg_text(box)))
+        mm = vpype.convert_length("1mm")
+        x0, y0, x1, y1 = (v / mm for v in box.bounds())
+        label = "paper edge" if which == "page" else "artwork box"
+        size = f"{x1 - x0:.1f} x {y1 - y0:.1f} mm ({(x1 - x0) / 25.4:.1f} x {(y1 - y0) / 25.4:.1f} in)"
+        self._start_job(f"{label} outline", document_to_gcode(doc, self.profile), size, delay)
 
     def start_registration(self, delay=None, tick_mm=None):
         self._require_ready()
@@ -459,6 +490,7 @@ class RemoteControl:
                     "/api/unlock": remote.unlock,
                     "/api/zero": remote.set_zero,
                     "/api/goto_zero": remote.go_to_zero,
+                    "/api/outline": lambda: remote.start_outline(body.get("which", "page"), body.get("delay")),
                     "/api/registration": lambda: remote.start_registration(body.get("delay"), body.get("tick_mm")),
                     "/api/layer": lambda: remote.select_layer(body["layer"]),
                     "/api/rotate": lambda: remote.set_rotation(body["degrees"]),
@@ -633,7 +665,15 @@ img{max-width:100%;border:1px solid var(--line);border-radius:8px;background:#ff
 <div class="row" style="align-items:center"><label for="delay" style="flex:2">Wait before plotting (seconds)</label><input id="delay" type="number" min="0" max="600" step="1" inputmode="numeric" style="flex:1;min-height:48px;font:inherit;border-radius:11px;border:1px solid var(--line);padding:0 12px;background:var(--card);color:var(--ink)"></div>
 <div class="kv">Applies to registration marks and plotting. STOP cancels the countdown.</div></section>
 
-<section><h2>3 · Registration marks</h2>
+<section><h2>3 · Outline (where the paper goes)</h2>
+<div id="outlinebox" hidden>
+<div class="row steps" id="outlinesel"><button data-o="page" class="on">Paper edge</button><button data-o="art">Artwork box</button></div>
+<div class="kv" id="outlineinfo"></div>
+<button id="outline" style="width:100%">Draw outline</button>
+<div class="kv">Load a dry-erase pen, draw this on the whiteboard, then place the paper inside it.</div></div>
+<div class="kv" id="nooutline">Load an SVG file to draw its outline.</div></section>
+
+<section><h2>4 · Registration marks</h2>
 <div class="kv">Paper <b id="paper"></b> <span id="papersrc"></span></div>
 <div class="row" style="align-items:center"><label for="tickmm" style="flex:2">Tick size (mm)</label>
 <button id="tickdn" style="flex:0 0 56px">−</button>
@@ -641,7 +681,7 @@ img{max-width:100%;border:1px solid var(--line);border-radius:8px;background:#ff
 <button id="tickup" style="flex:0 0 56px">+</button></div>
 <button id="reg" style="width:100%;margin-top:10px">Draw registration marks</button></section>
 
-<section><h2>4 · Plot</h2>
+<section><h2>5 · Plot</h2>
 <div class="kv">File: <b id="file">none</b></div>
 <div id="rotbox" hidden>
 <div class="kv">Rotate (clockwise)</div>
@@ -656,7 +696,7 @@ img{max-width:100%;border:1px solid var(--line);border-radius:8px;background:#ff
 <button id="stop">STOP</button>
 <script>
 const T=new URLSearchParams(location.search).get('token');
-let step=10,S={},delaySet=false,tickSet=false,settleSet=false,layerSig='',previewKey='';
+let step=10,S={},delaySet=false,tickSet=false,settleSet=false,outlineSel='page',layerSig='',previewKey='';
 const $=id=>document.getElementById(id);
 async function api(path,body){
   const r=await fetch(path,{method:body===undefined?'GET':'POST',headers:{'X-Token':T,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
@@ -676,6 +716,10 @@ function render(s){S=s;
   const pk=s.has_preview?s.file+'|'+s.layer+'|'+s.rotation:'';
   if(pk&&pk!==previewKey){previewKey=pk;$('prev').src='/api/file.svg?token='+T+'&layer='+encodeURIComponent(s.layer)+'&rot='+s.rotation+'&k='+Date.now()}
   for(const b of document.querySelectorAll('button:not(#stop)'))b.disabled=!!s.busy;
+  const fmt=m=>m?m[0].toFixed(1)+' × '+m[1].toFixed(1)+' mm ('+(m[0]/25.4).toFixed(1)+' × '+(m[1]/25.4).toFixed(1)+' in)':'unknown';
+  $('outlinebox').hidden=!s.has_preview;$('nooutline').hidden=!!s.has_preview;
+  $('outlineinfo').textContent=outlineSel==='page'?'Paper: '+fmt(s.paper_mm):'Artwork: '+fmt(s.art_mm);
+  for(const b of document.querySelectorAll('#outlinesel button'))b.classList.toggle('on',b.dataset.o===outlineSel);
   renderLayers(s);$('layer').disabled=!!s.busy;
   $('plot').disabled=!!s.busy||!s.file;
   if(!delaySet){$('delay').value=s.start_delay_s;delaySet=true}
@@ -699,6 +743,8 @@ $('saveup').onclick=()=>act('/api/save_height',{which:'up'});
 $('savedown').onclick=()=>act('/api/save_height',{which:'down'});
 $('savesettle').onclick=()=>act('/api/settle',{seconds:+$('settle').value||0});
 $('testline').onclick=()=>confirm('Lower the pen and draw a 10 mm line along +X from here?')&&act('/api/test_line',{mm:10});
+for(const b of document.querySelectorAll('#outlinesel button'))b.onclick=()=>{outlineSel=b.dataset.o;render(S)};
+$('outline').onclick=()=>confirm('Load the pen for the outline (a dry-erase pen?), then draw the '+(outlineSel==='page'?'paper edge':'artwork box')+'?')&&act('/api/outline',{which:outlineSel,delay:+$('delay').value||0});
 $('unlock').onclick=()=>confirm('Clear the alarm lock ($X)? Check that nothing is jammed and the machine is clear first.')&&act('/api/unlock',{});
 $('gozero').onclick=()=>act('/api/goto_zero',{});
 $('zero').onclick=()=>confirm('Set the current pen position as zero (X0 Y0)?')&&act('/api/zero',{});

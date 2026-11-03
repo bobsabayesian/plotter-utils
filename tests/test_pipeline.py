@@ -732,3 +732,71 @@ def test_remote_locked_controller_error_says_to_press_unlock(art):
         assert e.value.code == 409 and "Press Unlock" in body["error"] and "locked" in body["error"]
     finally:
         r.shutdown()
+
+
+# ---- outline (where the paper goes) ---------------------------------------------
+
+def test_bounding_box_document():
+    doc = vp.Document(page_size=(300, 200))
+    lc = vp.LineCollection()
+    lc.append([50 + 20j, 120 + 90j])
+    doc.add(lc, layer_id=1)
+    page = pu.bounding_box_document(doc, "page").layers[1][0]
+    assert list(page) == [0j, 300 + 0j, 300 + 200j, 200j, 0j]  # closed rectangle on the page edge
+    art = pu.bounding_box_document(doc, "art").layers[1][0]
+    assert (art[0], art[2]) == (50 + 20j, 120 + 90j) and art[0] == art[-1]
+    assert tuple(pu.bounding_box_document(doc, "art").page_size) == (300, 200)  # same page, same position
+    with pytest.raises(ValueError):
+        pu.bounding_box_document(doc, "circle")
+    with pytest.raises(ValueError):
+        pu.bounding_box_document(vp.Document(page_size=(10, 10)), "art")
+
+
+def _drawn_points(remote):
+    pts = []
+    for l in remote.conn.sent:
+        if l.startswith(("G00 X", "G01 X")):
+            pts.append((float(l.split("X")[1].split()[0]), float(l.split("Y")[1].split()[0])))
+    return pts
+
+
+def test_remote_outline_page_and_art(remote):
+    state = remote.call("/api/state")[1]
+    assert state["paper_mm"] == pytest.approx([210, 297], abs=0.1)
+    assert state["art_mm"] == pytest.approx([79.4, 26.5], abs=0.2)  # extent of the three test layers
+
+    assert remote.call("/api/outline", {"which": "page"})[0] == 409  # zero not set yet
+    remote.call("/api/zero", {})
+    remote.conn.sent.clear()
+    assert remote.call("/api/outline", {"which": "page"})[0] == 200
+    remote.wait_idle()
+    pts = _drawn_points(remote)
+    assert max(x for x, _ in pts) == pytest.approx(210, abs=0.1) and max(y for _, y in pts) == pytest.approx(297, abs=0.1)
+    assert remote.call("/api/state")[1]["message"].startswith("Done: paper edge outline")
+    assert [l for l in remote.conn.sent if l.startswith("G01")][-1].startswith("G01 X0.0")  # ends back at the start corner
+
+    remote.conn.sent.clear()
+    assert remote.call("/api/outline", {"which": "art"})[0] == 200
+    remote.wait_idle()
+    pts = _drawn_points(remote)
+    xs, ys = [x for x, _ in pts[:-1]], [y for _, y in pts[:-1]]  # skip the final return to X0 Y0
+    assert (min(xs), max(xs)) == pytest.approx((5.3, 84.7), abs=0.2) and (min(ys), max(ys)) == pytest.approx((5.3, 31.8), abs=0.2)
+    assert remote.call("/api/outline", {"which": "circle"})[0] == 409
+
+
+def test_remote_outline_follows_rotation_and_needs_an_svg(remote, tmp_path):
+    remote.profile.bed_size_mm = (297, 210)
+    remote.call("/api/rotate", {"degrees": 90})
+    assert remote.call("/api/state")[1]["paper_mm"] == pytest.approx([297, 210], abs=0.1)
+    remote.call("/api/zero", {})
+    remote.conn.sent.clear()
+    assert remote.call("/api/outline", {"which": "page"})[0] == 200
+    remote.wait_idle()
+    pts = _drawn_points(remote)
+    assert max(x for x, _ in pts) == pytest.approx(297, abs=0.1) and max(y for _, y in pts) == pytest.approx(210, abs=0.1)
+
+    gcode = tmp_path / "raw.gcode"
+    gcode.write_text("G21\nG1 X5 Y5\n")
+    remote.set_file(str(gcode))
+    remote.call("/api/zero", {})
+    assert remote.call("/api/outline", {"which": "page"})[0] == 409

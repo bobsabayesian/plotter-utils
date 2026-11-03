@@ -4,7 +4,7 @@ __all__ = [
     "PAPER_SIZE_GROUPS", "page_size_mm", "paper_size_table", "format_paper_sizes",
     "registration_ticks_document", "write_svg", "write_registration_ticks",
     "preview_svg", "generate_registration_ticks", "print_paper_sizes",
-    "svg_page_size_mm", "page_size_label", "page_size_string", "registration_ticks_svg", "rotate_document",
+    "svg_page_size_mm", "page_size_label", "page_size_string", "registration_ticks_svg", "rotate_document", "bounding_box_document", "document_to_svg_text",
 ]
 
 # ==============================================================================
@@ -165,11 +165,41 @@ def registration_ticks_svg(paper_size="a1", tick_length="2mm"):
     The registration ticks as SVG text, held in memory (nothing is written to disk).
     Feed it to read_document(io.StringIO(text)) to plot it like any other SVG.
     """
+    return document_to_svg_text(registration_ticks_document(paper_size, tick_length))
+
+
+def document_to_svg_text(document):
+    """
+    A vpype.Document as SVG text, in memory (nothing is written to disk).
+    """
     import io
-    doc = registration_ticks_document(paper_size, tick_length)
     buf = io.StringIO()
-    vpype.write_svg(buf, doc, page_size=doc.page_size)
+    vpype.write_svg(buf, document, page_size=document.page_size)
     return buf.getvalue()
+
+
+def bounding_box_document(document, which="page"):
+    """
+    A new Document, same page size, holding one closed rectangle:
+      which="page"  the page edge, i.e. where the paper goes
+      which="art"   the smallest box around all the drawn paths
+    Raises ValueError for an unknown choice or an empty drawing (for "art").
+    """
+    w, h = document.page_size
+    if which == "page":
+        x0, y0, x1, y1 = 0, 0, w, h
+    elif which == "art":
+        bounds = document.bounds()
+        if bounds is None:
+            raise ValueError("The drawing is empty, so it has no bounds")
+        x0, y0, x1, y1 = (float(v) for v in bounds)
+    else:
+        raise ValueError("which must be 'page' or 'art'")
+    lc = vpype.LineCollection()
+    lc.append([complex(x0, y0), complex(x1, y0), complex(x1, y1), complex(x0, y1), complex(x0, y0)])
+    out = vpype.Document(page_size=(w, h))
+    out.add(lc, layer_id=1)
+    return out
 
 
 def rotate_document(document, degrees=90):
