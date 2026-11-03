@@ -24,3 +24,7 @@ jsonfiles/
 
 jobfiles/
 machine.json
+
+# Packaging output
+build/
+*.egg-info/

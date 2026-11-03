@@ -6,10 +6,16 @@ build-backend = "setuptools.build_meta"
 name = "plotter-utils"
 version = "0.1.0"
 requires-python = ">=3.9"
-dependencies = ["vpype", "pyserial", "ipython", "ipywidgets", "segno"]
+# The core is just pyserial: that is all the G-code agent on the Pi Zero needs.
+dependencies = ["pyserial"]
 
 [project.optional-dependencies]
-test = ["pytest"]
+# Everything for the main machine: SVG processing, the tablet page, notebooks.
+full = ["vpype", "ipython", "ipywidgets", "segno"]
+test = ["pytest", "vpype", "ipython", "ipywidgets", "segno"]
+
+[project.scripts]
+plotter-agent = "plotter_utils.agent:main"
 
 [tool.setuptools]
 packages = ["plotter_utils"]

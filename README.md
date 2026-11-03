@@ -66,6 +66,7 @@ serial port (a pty that answers `ok`), and the SVG/G-code stages are tested on g
 | Y direction (`invert_y`) | **Unverified**; test with a small asymmetric shape |
 | Bed size / travel limits | **Unknown**; bounds checking is off until `bed_size_mm` is set |
 | `?` status query and buffered streaming on this firmware | **Untested** (`buffered=False` is the safe fallback) |
+| G-code agent on a Pi Zero + `RemoteConnection` | Tested against a fake board (including as a separate process); **not yet on a real Zero** |
 | Laser use | Raw G-code streaming only; no laser-aware tooling yet |
 | Python 3.11 on the Pi | Not yet tried (developed on 3.14 with vpype 1.9) |
 
@@ -85,7 +86,7 @@ git clone https://github.com/bobsabayesian/plotter-utils.git
 cd plotter-utils
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .            # editable: code changes show up after a kernel restart / %autoreload
+pip install -e ".[full]"    # editable; "full" adds vpype, IPython, ipywidgets, segno (everything for the main machine)
 pip install jupyterlab      # if not already installed
 ```
 
@@ -95,13 +96,16 @@ Serial access on Linux needs your user in the `dialout` group (log out and back 
 sudo usermod -aG dialout $USER
 ```
 
+(Plain `pip install -e .` installs only `pyserial`. That is deliberate: it is all the small G-code agent
+on a Pi Zero needs. See [Split deployment](#split-deployment-a-pi-zero-next-to-the-plotter).)
+
 The plotter usually appears as `/dev/ttyACM0` (native USB) or `/dev/ttyUSB0` (USB-serial chip).
 `pu.find_ports()` lists candidates.
 
 Run the tests:
 
 ```bash
-pip install -e ".[test]"
+pip install -e ".[test]"   # includes the full set of dependencies
 pytest
 ```
 
@@ -269,6 +273,14 @@ Custom page sizes are `"WIDTHxHEIGHT[unit]"` with no spaces; units `in, cm, mm, 
 | `layer_summaries(doc, pens=None)` / `extract_layer(doc, layer_id)` | Describe a Document's layers (`id`, `name`, `pen`, `hex_color`, `paths`) / get a one-layer copy. The remote page's picker uses these. |
 | `split_layers(svg, output_dir="layerfile", pens=None, group_by_pen=False, rotate=0)` | One SVG per layer (or per pen). Returns `LayerInfo(index, name, pen, hex_color, filename)` list. |
 
+### `plotter_utils.agent` and `plotter_utils.agent_client`
+
+| Name | Description |
+|---|---|
+| `python -m plotter_utils.agent` / `plotter-agent` | The agent process for the machine on the plotter's USB port (needs only `pyserial`). |
+| `serve_agent(port, baud, host, listen_port, token, watchdog_s, serial_timeout)` | Starts an `Agent` on a background thread and returns it (`.shutdown()` stops it). |
+| `RemoteConnection(url, token, timeout, poll_s, lost_after_s, abort_lines)` | `GrblConnection`'s methods, carried out through an agent. `connect(profile)` builds one when `profile.agent_url` is set. |
+
 ### `plotter_utils.compose`
 
 | Name | Description |
@@ -387,6 +399,8 @@ The per-layer sequence from `build_layer_job`:
 | `test_mode` | `True` | No hardware: `connect()` returns a simulator and real connections are refused. Set `False` once the plotter is here. |
 | `port` | `"/dev/ttyACM0"` | Serial device. |
 | `baud` | `115200` | Serial speed. |
+| `agent_url` | `""` | If set (e.g. `"http://plotter-zero.local:8765"`), `connect()` returns a `RemoteConnection` to the G-code agent there instead of opening `port`. |
+| `agent_token` | `""` | The agent's token; or set `PLOTTER_AGENT_TOKEN`. Saved in plain text by `profile.save()`. |
 | `paper_size` | `"a1"` | Fallback page size, used only when a file declares none (e.g. raw G-code). SVG jobs and the remote page use the file's own page size. |
 | `bed_size_mm` | `None` | `(width, height)` for bounds checking; `None` disables it. Set from `$130/$131` or by measuring. |
 | `pen_up_z` | `0` | Z value (0–9) with the pen lifted. |
@@ -619,7 +633,7 @@ to persist the runner's progress for resuming a half-done job.
 pytest
 ```
 
-`tests/test_pipeline.py` covers layer splitting and pen grouping, G-code generation and bounds
+`tests/test_agent.py` runs HTTP client -> agent -> serial -> a fake GRBL board (stalls, errors, resets with `ALARM:3`): jobs, progress, STOP, the one-job rule, the watchdog, the token, and the tablet page through the whole stack. `tests/test_pipeline.py` covers layer splitting and pen grouping, G-code generation and bounds
 checking, profile and job round-trips, optimization (including that the input is not mutated),
 a dry-run job from SVG to `.gcode`, and the serial streamer in both modes (plus error handling)
 against a pty that stands in for the controller. None of it needs hardware.
@@ -669,9 +683,7 @@ against a pty that stands in for the controller. None of it needs hardware.
 - Laser-aware output (vector and raster) and a laser job type
 - Position readout and jog controls
 - Backend interface once there is a second machine type
-- **Split deployment: a thin G-code agent on a Pi Zero.** Keep everything heavy (SVG processing, the tablet
-  page, optimization) on the main server and put a small agent next to the plotter that owns the serial
-  port. See [Split deployment](#split-deployment-a-pi-zero-next-to-the-plotter).
+- ~~Split deployment: a thin G-code agent on a Pi Zero~~ built (see [Split deployment](#split-deployment-a-pi-zero-next-to-the-plotter)); still to do: try it on the real Zero and plotter, and a way to restart or update the agent remotely
 - Larger paper/tiling workflow for artwork bigger than the bed
 - The GUI
 
@@ -679,48 +691,97 @@ against a pty that stands in for the controller. None of it needs hardware.
 
 ## Split deployment: a Pi Zero next to the plotter
 
-Possible, and the code is already shaped for it: everything talks to the machine through one connection
-object (`connect(profile)` returns a `GrblConnection` or a `SimulatedConnection`), so a network-backed one
-can slot in without touching the pipeline, the page or the job runner.
+Run the heavy parts (SVG processing, the tablet page, notebooks) on one machine and put a small
+**G-code agent** on a Pi Zero that has the plotter on its USB port.
 
 ```
-main server (this repo, vpype, tablet page)  --LAN-->  Pi Zero "agent"  --USB-->  plotter
- SVG -> optimize -> G-code                              owns the serial port
-                                                         streams the job locally
+main machine (this repo, vpype, tablet page)  --LAN-->  Pi Zero: plotter-agent  --USB-->  plotter
+ SVG -> optimize -> G-code                                owns the serial port, streams each
+ RemoteConnection                                         job to GRBL locally
 ```
 
-**Design (recommended): job-level agent.** The main server sends a whole G-code job to the agent, which
-streams it to GRBL locally and reports progress. A `RemoteConnection` on the main side has the same
-methods as `GrblConnection` (`send_lines`, `command`, `status`, `stop`, `unlock`, `set_zero`, `pen_up`,
-`pen_down`), implemented as calls to the agent. Why this beats forwarding the serial port:
-a Wi-Fi hiccup can't stall a stroke mid-line, because the job is already on the Pi Zero; STOP and
-unlock are single small messages; and nothing needs to guess about latency.
+The main machine sends a whole job to the agent, which streams it to the controller locally and
+reports progress. A Wi-Fi hiccup therefore can't stall a stroke mid-line. `RemoteConnection` has the same
+methods as `GrblConnection`, so the pipeline, the job runner and the tablet page need no changes: set
+`profile.agent_url` and `pu.connect(profile)` returns it.
 
-**Quick experiment (no new code): serial over the network.** `ser2net` or `socat` on the Pi Zero exposes the
-port as TCP, and pyserial opens URLs such as `socket://zero.local:3333` or `rfc2217://zero.local:2217`.
-This works for jogging and short tests, but the one-line-at-a-time handshake pays a network round trip per
-line, and a dropout mid-plot can leave the pen down mid-stroke, so don't rely on it for real jobs.
+> **Status:** built and tested against a fake GRBL board (the agent as a real process, a pyserial-only
+> environment, the whole stack through the tablet page). **Not yet run on a real Pi Zero or the plotter.**
 
-**What would need to change:**
-- an agent, one small file using only `pyserial` and the standard library (the Zero should not need
-  vpype, numpy or IPython). `gcode_sender.py` already needs only `pyserial`, but `import plotter_utils`
-  pulls in everything, so the agent should be importable on its own (a separate entry point or a lazy
-  package `__init__`)
-- a protocol: start job (lines or a file), progress, stop, status, unlock, single command, with the same
-  tokenized access as the tablet page; the agent should also turn the laser off and raise the pen if it
-  loses its controller mid-job
-- `RemoteConnection` plus a `profile.agent_url` (or similar) that `connect()` prefers over a local port
-- tests against a fake agent, as the current ones use a fake serial port and a simulated connection
+### Setting up the Zero
 
-**Hardware notes.** A Pi Zero 2 W (or a Zero W) has Wi-Fi; the original Zero does not. The Zero's USB data
-port is a host-capable micro-USB, so it needs an OTG adapter to the plotter, and the plotter keeps its own
-power. Use a good power supply: serial drops from brown-outs look like random alarms. Give it a fixed
-address or a `.local` name, and keep it on a trusted network, since whoever can reach the agent can move
-the machine.
+1. **Flash Raspberry Pi OS Lite** with Raspberry Pi Imager; in its settings set a hostname (say
+   `plotter-zero`), enable SSH and enter your Wi-Fi. Use a **Zero 2 W** or Zero W: the original Zero has
+   no Wi-Fi. The Zero's data port is micro-USB, so use an OTG adapter to the plotter's cable; the
+   plotter keeps its own power. Use a decent power supply: brown-outs show up as random alarms.
+2. **Install only the agent** (it needs just `pyserial`):
+   ```bash
+   sudo apt install -y python3-venv git
+   git clone https://github.com/bobsabayesian/plotter-utils.git
+   python3 -m venv ~/plotter-venv
+   ~/plotter-venv/bin/pip install ./plotter-utils        # no [full]: no vpype, numpy or IPython
+   sudo usermod -aG dialout $USER                        # then log out and back in
+   ls /dev/ttyACM* /dev/ttyUSB*                          # the plotter should be listed
+   ```
+3. **Run it once by hand:**
+   ```bash
+   ~/plotter-venv/bin/plotter-agent
+   ```
+   It prints its address and, the first time, a token (saved to `~/.plotter_agent_token`, readable only
+   by you). Options: `--port` (default `auto`: the only USB serial device, else say which),
+   `--listen-port 8765`, `--watchdog 20`, `--token` / `$PLOTTER_AGENT_TOKEN`.
+4. **Point the main machine at it.** In the notebook:
+   ```python
+   profile = pu.MachineProfile(test_mode=False,
+                               agent_url="http://plotter-zero.local:8765",
+                               agent_token="<the token>")   # or export PLOTTER_AGENT_TOKEN
+   g = pu.connect(profile)        # a RemoteConnection; fails with a clear message if unreachable
+   print(g.status())              # e.g. <Idle|MPos:0.000,0.000,0.000|...>
+   ```
+   Then everything else works as before: `pu.serve_remote(profile, connection=g, ...)`, the job stepper,
+   `g.send_file("job.gcode")`. The [first-connection checklist](#first-connection-checklist) applies
+   unchanged. Save the URL (and token) with `profile.save("machine.json")`; the token is stored in
+   plain text, so keep that file private.
+5. **Run it at boot** with systemd:
+   ```bash
+   sudo cp plotter-utils/deploy/plotter-agent.service /etc/systemd/system/
+   sudo nano /etc/systemd/system/plotter-agent.service   # set User= and the venv path
+   sudo systemctl daemon-reload && sudo systemctl enable --now plotter-agent
+   journalctl -u plotter-agent -f
+   ```
+   `systemctl stop` sends SIGTERM; the agent stops a running job (so the laser can't stay on) before it exits.
+6. **Optional:** turn off Wi-Fi power saving on the Zero for steadier latency
+   (`sudo iw dev wlan0 set power_save off`; add it to a boot script to keep it).
 
-**Trade-offs.** The agent becomes a second thing to keep updated and the place where STOP must work even
-if the main server is down, so keep it small. The estimated position, zero and Unlock logic stay on the
-main side, as now, but the agent must refuse to run two jobs at once.
+### How it behaves
+
+| Situation | What happens |
+|---|---|
+| A job is sent | The agent streams it locally; the main machine polls progress (`on_progress` works as usual). |
+| Short commands (pen moves, jog, set zero) | Complete inside one request, so they feel instant. |
+| STOP | One message: feed hold + reset on the agent. The running `send_lines` raises `GrblStopped`. Works any time, even mid-job. |
+| One job at a time | A second job, or a single command while a job runs, is refused with a clear message. |
+| Main machine disappears mid-job (**watchdog**) | The main side polls the agent while a job runs. If nothing is heard for `--watchdog` seconds (default 20) the agent stops the job (the reset turns the laser off), then runs the connection's abort lines (`$X`, then a pen-up move) so the pen isn't left on the paper. `--watchdog 0` turns it off. |
+| Agent restarted or crashed mid-job | The job is lost. A clean stop (`systemctl stop`) stops the controller first; a hard crash can't, so check the pen and re-zero. |
+| Plotter unplugged or replugged | The agent drops the dead port and reopens it on the next request (the port number may change; `auto` finds it). |
+| Wrong or missing token | `RemoteConnection` raises a clear error naming `agent_token` / `PLOTTER_AGENT_TOKEN`. |
+
+**Security.** The token is the only protection and traffic is plain HTTP: anyone on your network who has
+it can move the machine. Use a trusted network, don't expose the port to the internet, and treat the token
+like a key.
+
+**Protocol** (JSON over HTTP, `X-Token` header): `GET /status`; `POST /job {"lines", "buffered",
+"abort_lines", "wait_s"}`; `POST /command {"line"}`; `POST /unlock`; `POST /stop`.
+
+**Troubleshooting.**
+- `Cannot reach the plotter agent`: check the URL and port, that the agent is running
+  (`systemctl status plotter-agent`), and that both machines are on the same network.
+- `No connection to the plotter` (HTTP 503): the agent is up but can't open the serial port. Check the
+  cable and power, `ls /dev/ttyACM*` on the Zero, and the `dialout` group.
+- `status()` returns `None` during a job: expected. The agent's streamer owns the serial port while a
+  job runs.
+- Two things must not use the plotter at once: don't open the serial port directly on the Zero while the
+  agent is running.
 
 ---
 
@@ -737,13 +798,17 @@ plotter_utils/
   gcode.py          Document -> G-code, time estimate
   gcode_sender.py   GRBL serial connection and raw G-code tools
   job.py            Step/Job plan, action registry, Frontend, JobRunner
+  agent.py          G-code agent for the machine on the plotter (pyserial only)
+  agent_client.py   RemoteConnection: GrblConnection's interface through an agent
   notebook.py       ipywidgets stepper frontend
   remote.py         tablet web UI: calibrate, jog, zero, registration, plot
 examples/
   workflow.ipynb    end-to-end example notebook
 tests/
   test_pipeline.py  hardware-free tests
-pyproject.toml      packaging (pip install -e .)
+deploy/
+  plotter-agent.service  systemd unit for the agent
+pyproject.toml      packaging (core = pyserial; extras: full, test)
 ```
 
 `__all__` in each module controls what `import plotter_utils as pu` exposes; to add a module, give

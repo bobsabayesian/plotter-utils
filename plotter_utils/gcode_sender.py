@@ -340,11 +340,17 @@ def connect(profile):
     """
     The one place a connection is made. With profile.test_mode (the default) it returns
     a SimulatedConnection and never touches a serial port; otherwise it opens the
-    real GrblConnection on profile.port. If that port doesn't exist but exactly one USB
-    serial device is attached, it uses that one and prints which (see resolve_port).
+    real connection: a RemoteConnection to the G-code agent when profile.agent_url is set
+    (the plotter is on another machine), otherwise a GrblConnection on profile.port. If that
+    port doesn't exist but exactly one USB serial device is attached, it uses that one and
+    prints which (see resolve_port).
     """
     if profile.test_mode:
         return SimulatedConnection()
+    if getattr(profile, "agent_url", ""):
+        from .agent_client import RemoteConnection
+        token = profile.agent_token or os.environ.get("PLOTTER_AGENT_TOKEN", "")
+        return RemoteConnection(profile.agent_url, token, abort_lines=["$X", f"G00 Z{profile.pen_up_z:g}"])
     port, note = resolve_port(profile.port)
     if note:
         print(note)

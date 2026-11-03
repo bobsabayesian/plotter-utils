@@ -27,6 +27,8 @@ class MachineProfile:
     test_mode: bool = True         # no hardware: connect() returns a simulator; set False once the plotter is here
     port: str = "/dev/ttyACM0"
     baud: int = 115200
+    agent_url: str = ""            # e.g. "http://plotter-zero.local:8765": use a G-code agent instead of a local port
+    agent_token: str = ""          # the agent's token (or set PLOTTER_AGENT_TOKEN in the environment)
     paper_size: str = "a1"
     bed_size_mm: tuple = None      # (width, height); None disables bounds checking
     pen_up_z: float = 0            # the iDraw lifts the pen with a Z move, 0-9

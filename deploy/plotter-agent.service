@@ -1,0 +1,25 @@
+# systemd unit for the plotter G-code agent on the machine plugged into the plotter.
+#
+#   sudo cp deploy/plotter-agent.service /etc/systemd/system/
+#   sudo nano /etc/systemd/system/plotter-agent.service     # set User and the venv path
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now plotter-agent
+#   journalctl -u plotter-agent -f                           # watch it
+[Unit]
+Description=Plotter G-code agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# The user must own the token file (~/.plotter_agent_token) and be allowed to open the serial port.
+User=pi
+SupplementaryGroups=dialout
+ExecStart=/home/pi/plotter-venv/bin/plotter-agent --watchdog 20
+Restart=on-failure
+RestartSec=3
+# systemctl stop sends SIGTERM; the agent stops a running job (laser off) before it exits.
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
