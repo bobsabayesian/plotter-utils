@@ -669,8 +669,58 @@ against a pty that stands in for the controller. None of it needs hardware.
 - Laser-aware output (vector and raster) and a laser job type
 - Position readout and jog controls
 - Backend interface once there is a second machine type
+- **Split deployment: a thin G-code agent on a Pi Zero.** Keep everything heavy (SVG processing, the tablet
+  page, optimization) on the main server and put a small agent next to the plotter that owns the serial
+  port. See [Split deployment](#split-deployment-a-pi-zero-next-to-the-plotter).
 - Larger paper/tiling workflow for artwork bigger than the bed
 - The GUI
+
+---
+
+## Split deployment: a Pi Zero next to the plotter
+
+Possible, and the code is already shaped for it: everything talks to the machine through one connection
+object (`connect(profile)` returns a `GrblConnection` or a `SimulatedConnection`), so a network-backed one
+can slot in without touching the pipeline, the page or the job runner.
+
+```
+main server (this repo, vpype, tablet page)  --LAN-->  Pi Zero "agent"  --USB-->  plotter
+ SVG -> optimize -> G-code                              owns the serial port
+                                                         streams the job locally
+```
+
+**Design (recommended): job-level agent.** The main server sends a whole G-code job to the agent, which
+streams it to GRBL locally and reports progress. A `RemoteConnection` on the main side has the same
+methods as `GrblConnection` (`send_lines`, `command`, `status`, `stop`, `unlock`, `set_zero`, `pen_up`,
+`pen_down`), implemented as calls to the agent. Why this beats forwarding the serial port:
+a Wi-Fi hiccup can't stall a stroke mid-line, because the job is already on the Pi Zero; STOP and
+unlock are single small messages; and nothing needs to guess about latency.
+
+**Quick experiment (no new code): serial over the network.** `ser2net` or `socat` on the Pi Zero exposes the
+port as TCP, and pyserial opens URLs such as `socket://zero.local:3333` or `rfc2217://zero.local:2217`.
+This works for jogging and short tests, but the one-line-at-a-time handshake pays a network round trip per
+line, and a dropout mid-plot can leave the pen down mid-stroke, so don't rely on it for real jobs.
+
+**What would need to change:**
+- an agent, one small file using only `pyserial` and the standard library (the Zero should not need
+  vpype, numpy or IPython). `gcode_sender.py` already needs only `pyserial`, but `import plotter_utils`
+  pulls in everything, so the agent should be importable on its own (a separate entry point or a lazy
+  package `__init__`)
+- a protocol: start job (lines or a file), progress, stop, status, unlock, single command, with the same
+  tokenized access as the tablet page; the agent should also turn the laser off and raise the pen if it
+  loses its controller mid-job
+- `RemoteConnection` plus a `profile.agent_url` (or similar) that `connect()` prefers over a local port
+- tests against a fake agent, as the current ones use a fake serial port and a simulated connection
+
+**Hardware notes.** A Pi Zero 2 W (or a Zero W) has Wi-Fi; the original Zero does not. The Zero's USB data
+port is a host-capable micro-USB, so it needs an OTG adapter to the plotter, and the plotter keeps its own
+power. Use a good power supply: serial drops from brown-outs look like random alarms. Give it a fixed
+address or a `.local` name, and keep it on a trusted network, since whoever can reach the agent can move
+the machine.
+
+**Trade-offs.** The agent becomes a second thing to keep updated and the place where STOP must work even
+if the main server is down, so keep it small. The estimated position, zero and Unlock logic stay on the
+main side, as now, but the agent must refuse to run two jobs at once.
 
 ---
 
