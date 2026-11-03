@@ -17,3 +17,4 @@ from .layers import *
 from .notebook import *
 from .optimize import *
 from .remote import *
+from .compose import *

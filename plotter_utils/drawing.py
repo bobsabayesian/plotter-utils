@@ -4,7 +4,7 @@ __all__ = [
     "PAPER_SIZE_GROUPS", "page_size_mm", "paper_size_table", "format_paper_sizes",
     "registration_ticks_document", "write_svg", "write_registration_ticks",
     "preview_svg", "generate_registration_ticks", "print_paper_sizes",
-    "svg_page_size_mm", "page_size_label", "page_size_string", "registration_ticks_svg", "rotate_document", "bounding_box_document", "document_to_svg_text",
+    "svg_page_size_mm", "page_size_label", "page_size_string", "registration_ticks_svg", "rotate_document", "bounding_box_document", "document_to_svg_text", "corner_tick_lines",
 ]
 
 # ==============================================================================
@@ -140,6 +140,19 @@ def format_paper_sizes():
     return "\n".join(lines)
 
 
+def corner_tick_lines(x0, y0, x1, y1, t):
+    """
+    The four diagonal registration ticks for a rectangle (px), each pointing inward
+    from a corner by `t` on both axes. Returns a list of two-point lines.
+    """
+    return [
+        [complex(x0, y0), complex(x0 + t, y0 + t)],  # Top-Left
+        [complex(x1, y0), complex(x1 - t, y0 + t)],  # Top-Right
+        [complex(x1, y1), complex(x1 - t, y1 - t)],  # Bottom-Right
+        [complex(x0, y1), complex(x0 + t, y1 - t)],  # Bottom-Left
+    ]
+
+
 def registration_ticks_document(paper_size="a1", tick_length="2mm"):
     """
     Builds a vpype.Document with a diagonal registration mark pointing inward
@@ -150,10 +163,8 @@ def registration_ticks_document(paper_size="a1", tick_length="2mm"):
     t = vpype.convert_length(tick_length)
 
     lc = vpype.LineCollection()
-    lc.append([0 + 0j, t + t * 1j])                  # Top-Left
-    lc.append([w + 0j, (w - t) + t * 1j])            # Top-Right
-    lc.append([w + h * 1j, (w - t) + (h - t) * 1j])  # Bottom-Right
-    lc.append([0 + h * 1j, t + (h - t) * 1j])        # Bottom-Left
+    for line in corner_tick_lines(0, 0, w, h, t):
+        lc.append(line)
 
     doc = vpype.Document(page_size=(w, h))
     doc.add(lc, layer_id=1)

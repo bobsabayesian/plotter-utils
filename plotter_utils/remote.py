@@ -6,6 +6,7 @@ import os
 import re
 import secrets
 import socket
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -13,8 +14,9 @@ from urllib.parse import parse_qs, urlparse
 
 import vpype
 
+from .compose import cards_outline_document, cards_registration_document, compose_cards
 from .drawing import (bounding_box_document, document_to_svg_text, page_size_label, page_size_string,
-                      registration_ticks_svg, rotate_document, svg_page_size_mm)
+                      registration_ticks_svg, rotate_document, svg_page_size_mm, write_svg)
 from .gcode import document_to_gcode, estimate_plot
 from .gcode_sender import GrblError, GrblStopped, connect, read_gcode
 from .job import wait_with_cancel
@@ -86,6 +88,8 @@ class RemoteControl:
         self.httpd = None
         self.rotation = 0  # degrees clockwise: 0, 90, 180, 270
         self.paper = self._paper_from_file()
+        self.placements = []     # Placement list when a batch of cards is loaded (see set_batch)
+        self._tmp = None         # temp folder holding the composed batch SVG
         self.art_mm = None       # (width, height) mm of the drawn paths, after rotation
         self.layers = []         # LayerSummary list for the loaded SVG
         self.layer_sel = "all"   # a layer id, or "all"
@@ -102,7 +106,8 @@ class RemoteControl:
             "test_mode": p.test_mode, "busy": self.busy, "progress": self.progress,
             "message": self.message, "pen_z": self.pen_z, "pen_up_z": p.pen_up_z,
             "pen_down_z": p.pen_down_z, "pen_settle_s": p.pen_settle_s, "pos": self.pos, "zero_set": self.pos is not None,
-            "file": os.path.basename(self.file) if self.file else None,
+            "file": self._file_label(),
+            "batch": {"cards": len(self.placements), "names": [pl.name for pl in self.placements]} if self.placements else None,
             "has_preview": bool(self.file and self.file.lower().endswith(".svg")),
             "paper_size": page_size_label(*self.paper) if self.paper else p.paper_size,
             "paper_source": "file" if self.paper else "profile", "tick_mm": self.tick_mm,
@@ -131,10 +136,42 @@ class RemoteControl:
         if not os.path.exists(path):
             raise FileNotFoundError(path)
         self.file = path
+        self.placements = []
         self.rotation = 0
         self.paper = self._paper_from_file()
         self._load_layers()
         self.message = f"File set: {os.path.basename(path)}"
+
+    def _file_label(self):
+        if self.placements:
+            w, h = self.paper
+            return f"batch: {len(self.placements)} cards on a {w:.0f} x {h:.0f} mm sheet"
+        return os.path.basename(self.file) if self.file else None
+
+    def set_batch(self, items, sheet_mm=None, gap_mm=10, margin_mm=10, rotate=0):
+        """
+        Loads several SVGs as one tiled sheet. Layers are merged by pen, so each pen plots
+        every card at once; the Outline and Registration buttons then work per card. `items`
+        are paths, (path, copies) pairs or {"file", "copies", "rotate"} dicts (see
+        compose_cards). sheet_mm defaults to profile.bed_size_mm. Replaces the loaded file.
+        """
+        if self.busy:
+            raise RemoteError(f"Busy: {self.busy}")
+        sheet_mm = sheet_mm or self.profile.bed_size_mm
+        if not sheet_mm:
+            raise ValueError("Give sheet_mm=(width, height) in mm, or set profile.bed_size_mm first")
+        sheet, placements = compose_cards(items, sheet_mm, gap_mm, margin_mm, rotate, self.profile.pens)
+        if self._tmp is None:
+            self._tmp = tempfile.TemporaryDirectory(prefix="plotter_batch_")
+        path = write_svg(sheet, os.path.join(self._tmp.name, "batch.svg"))
+        self.set_file(path)  # resets rotation, reads layers and the sheet size
+        self.placements = placements
+        self.message = f"Loaded {len(placements)} cards. Sheet {sheet_mm[0]:g} x {sheet_mm[1]:g} mm."
+        return placements
+
+    def _sheet_px(self):
+        mm = vpype.convert_length("1mm")
+        return (self.paper[0] * mm, self.paper[1] * mm)
 
     def _load_layers(self):
         """Lists the SVG's layers for the picker. Several layers start on the first one,
@@ -161,11 +198,23 @@ class RemoteControl:
         """
         if (layer == "all" or not self.layers) and self.rotation == 0:
             with open(self.file, "rb") as f:
-                return f.read()
+                return self._with_card_boxes(f.read())
         doc = self._view_document(layer)
         buf = io.StringIO()
         vpype.write_svg(buf, doc, page_size=doc.page_size)
-        return buf.getvalue().encode()
+        return self._with_card_boxes(buf.getvalue().encode())
+
+    def _with_card_boxes(self, svg):
+        """For a batch, draws a dashed box around every card so the layout is visible in the preview."""
+        if not self.placements:
+            return svg
+        mm = vpype.convert_length("1mm")
+        rects = "".join(
+            f'<rect x="{p.x_mm * mm:.2f}" y="{p.y_mm * mm:.2f}" width="{p.width_mm * mm:.2f}" '
+            f'height="{p.height_mm * mm:.2f}" fill="none" stroke="#888" stroke-width="1.5" stroke-dasharray="8 6"/>'
+            for p in self.placements)
+        head, _, tail = svg.rpartition(b"</svg>")
+        return head + f"<g>{rects}</g>".encode() + b"</svg>" + tail
 
     def _view_document(self, layer):
         """The loaded SVG as it will plot: just `layer` (or all), then rotated.
@@ -180,6 +229,8 @@ class RemoteControl:
             raise RemoteError(f"Busy: {self.busy}")
         if not (self.file and self.file.lower().endswith(".svg")):
             raise RemoteError("Rotation applies to SVG files only")
+        if self.placements:
+            raise RemoteError("Rotate cards individually: set_batch(..., rotate=90) or a per-item rotate")
         degrees = int(degrees)
         if degrees not in (0, 90, 180, 270):
             raise RemoteError("Rotation must be 0, 90, 180 or 270")
@@ -322,15 +373,24 @@ class RemoteControl:
         if not (self.file and self.file.lower().endswith(".svg")):
             raise RemoteError("An outline needs an SVG file loaded")
         try:
-            box = bounding_box_document(self._view_document("all"), which)
+            if which in ("cards", "card_art"):
+                if not self.placements:
+                    raise RemoteError("Per-card outlines need a batch: call set_batch([...])")
+                box = cards_outline_document(self.placements, self._sheet_px(), which)
+            else:
+                box = bounding_box_document(self._view_document("all"), which)
         except ValueError as e:
             raise RemoteError(str(e))
         # Same route as any SVG, held in memory: no file is written
         doc = read_document(io.StringIO(document_to_svg_text(box)))
         mm = vpype.convert_length("1mm")
         x0, y0, x1, y1 = (v / mm for v in box.bounds())
-        label = "paper edge" if which == "page" else "artwork box"
-        size = f"{x1 - x0:.1f} x {y1 - y0:.1f} mm ({(x1 - x0) / 25.4:.1f} x {(y1 - y0) / 25.4:.1f} in)"
+        if which in ("cards", "card_art"):
+            label = "card edge" if which == "cards" else "card artwork"
+            size = f"{len(self.placements)} cards"
+        else:
+            label = ("sheet edge" if self.placements else "paper edge") if which == "page" else "artwork box"
+            size = f"{x1 - x0:.1f} x {y1 - y0:.1f} mm ({(x1 - x0) / 25.4:.1f} x {(y1 - y0) / 25.4:.1f} in)"
         self._start_job(f"{label} outline", document_to_gcode(doc, self.profile), size, delay)
 
     def start_registration(self, delay=None, tick_mm=None):
@@ -338,7 +398,11 @@ class RemoteControl:
         if tick_mm is not None:
             self.set_tick(tick_mm)
         # Same route as any SVG (SVG text -> Document -> G-code), but held in memory: no file is written
-        doc = read_document(io.StringIO(registration_ticks_svg(self.paper_string(), f"{self.tick_mm:g}mm")))
+        if self.placements:  # a batch: ticks at the corners of every card's paper
+            ticks = document_to_svg_text(cards_registration_document(self.placements, self._sheet_px(), self.tick_mm))
+        else:
+            ticks = registration_ticks_svg(self.paper_string(), f"{self.tick_mm:g}mm")
+        doc = read_document(io.StringIO(ticks))
         self._start_job("registration marks", document_to_gcode(doc, self.profile), delay=delay)
 
     def start_plot(self, delay=None):
@@ -552,6 +616,9 @@ class RemoteControl:
         return f"http://{name}.local:{self.port}/?token={self.token}"
 
     def shutdown(self):
+        if self._tmp is not None:
+            self._tmp.cleanup()
+            self._tmp = None
         if self.httpd:
             self.httpd.shutdown()
             self.httpd.server_close()
@@ -667,7 +734,7 @@ img{max-width:100%;border:1px solid var(--line);border-radius:8px;background:#ff
 
 <section><h2>3 · Outline (where the paper goes)</h2>
 <div id="outlinebox" hidden>
-<div class="row steps" id="outlinesel"><button data-o="page" class="on">Paper edge</button><button data-o="art">Artwork box</button></div>
+<div class="row steps" id="outlinesel"></div>
 <div class="kv" id="outlineinfo"></div>
 <button id="outline" style="width:100%">Draw outline</button>
 <div class="kv">Load a dry-erase pen, draw this on the whiteboard, then place the paper inside it.</div></div>
@@ -696,7 +763,7 @@ img{max-width:100%;border:1px solid var(--line);border-radius:8px;background:#ff
 <button id="stop">STOP</button>
 <script>
 const T=new URLSearchParams(location.search).get('token');
-let step=10,S={},delaySet=false,tickSet=false,settleSet=false,outlineSel='page',layerSig='',previewKey='';
+let step=10,S={},delaySet=false,tickSet=false,settleSet=false,outlineSel='page',outlineSig='',layerSig='',previewKey='';
 const $=id=>document.getElementById(id);
 async function api(path,body){
   const r=await fetch(path,{method:body===undefined?'GET':'POST',headers:{'X-Token':T,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
@@ -707,7 +774,7 @@ function render(s){S=s;
   const [d,t]=s.progress;$('bar').firstElementChild.style.width=(s.busy&&t?100*d/t:0)+'%';
   $('pos').textContent=s.pos?s.pos[0].toFixed(1)+', '+s.pos[1].toFixed(1)+' mm (estimate)':'not set';
   $('penz').textContent='Z'+s.pen_z;$('upz').textContent='Z'+s.pen_up_z;$('downz').textContent='Z'+s.pen_down_z;
-  $('paper').textContent=s.paper_size;$('papersrc').textContent=s.paper_source==='file'?'(from the loaded file)':'(from profile; file has no page size)';if(!tickSet){$('tickmm').value=s.tick_mm;tickSet=true}
+  $('paper').textContent=s.paper_size;$('papersrc').textContent=s.batch?'(batch sheet; ticks go on every card)':s.paper_source==='file'?'(from the loaded file)':'(from profile; file has no page size)';if(!tickSet){$('tickmm').value=s.tick_mm;tickSet=true}
   if(!settleSet){$('settle').value=s.pen_settle_s;settleSet=true}
   $('file').textContent=s.file||'none';$('prev').hidden=!s.has_preview;
   $('rotbox').hidden=!s.has_preview;
@@ -718,8 +785,11 @@ function render(s){S=s;
   for(const b of document.querySelectorAll('button:not(#stop)'))b.disabled=!!s.busy;
   const fmt=m=>m?m[0].toFixed(1)+' × '+m[1].toFixed(1)+' mm ('+(m[0]/25.4).toFixed(1)+' × '+(m[1]/25.4).toFixed(1)+' in)':'unknown';
   $('outlinebox').hidden=!s.has_preview;$('nooutline').hidden=!!s.has_preview;
-  $('outlineinfo').textContent=outlineSel==='page'?'Paper: '+fmt(s.paper_mm):'Artwork: '+fmt(s.art_mm);
+  const OPTS=s.batch?[['cards','Each card'],['card_art','Card artwork'],['page','Sheet edge']]:[['page','Paper edge'],['art','Artwork box']];
+  if(JSON.stringify(OPTS)!==outlineSig){outlineSig=JSON.stringify(OPTS);outlineSel=OPTS[0][0];const box=$('outlinesel');box.innerHTML='';
+    OPTS.forEach(o=>{const b=document.createElement('button');b.dataset.o=o[0];b.textContent=o[1];b.onclick=()=>{outlineSel=o[0];render(S)};box.appendChild(b)})}
   for(const b of document.querySelectorAll('#outlinesel button'))b.classList.toggle('on',b.dataset.o===outlineSel);
+  $('outlineinfo').textContent=outlineSel==='cards'?s.batch.cards+' cards: the edge of each card\'s paper':outlineSel==='card_art'?s.batch.cards+' cards: the box around each card\'s artwork':outlineSel==='page'?(s.batch?'Sheet: ':'Paper: ')+fmt(s.paper_mm):'Artwork: '+fmt(s.art_mm);
   renderLayers(s);$('layer').disabled=!!s.busy;
   $('plot').disabled=!!s.busy||!s.file;
   if(!delaySet){$('delay').value=s.start_delay_s;delaySet=true}
@@ -743,8 +813,7 @@ $('saveup').onclick=()=>act('/api/save_height',{which:'up'});
 $('savedown').onclick=()=>act('/api/save_height',{which:'down'});
 $('savesettle').onclick=()=>act('/api/settle',{seconds:+$('settle').value||0});
 $('testline').onclick=()=>confirm('Lower the pen and draw a 10 mm line along +X from here?')&&act('/api/test_line',{mm:10});
-for(const b of document.querySelectorAll('#outlinesel button'))b.onclick=()=>{outlineSel=b.dataset.o;render(S)};
-$('outline').onclick=()=>confirm('Load the pen for the outline (a dry-erase pen?), then draw the '+(outlineSel==='page'?'paper edge':'artwork box')+'?')&&act('/api/outline',{which:outlineSel,delay:+$('delay').value||0});
+$('outline').onclick=()=>confirm('Load the pen for the outline (a dry-erase pen?), then draw the '+({cards:'edge of each card',card_art:'box around each card\'s artwork',page:S.batch?'sheet edge':'paper edge',art:'artwork box'}[outlineSel])+'?')&&act('/api/outline',{which:outlineSel,delay:+$('delay').value||0});
 $('unlock').onclick=()=>confirm('Clear the alarm lock ($X)? Check that nothing is jammed and the machine is clear first.')&&act('/api/unlock',{});
 $('gozero').onclick=()=>act('/api/goto_zero',{});
 $('zero').onclick=()=>confirm('Set the current pen position as zero (X0 Y0)?')&&act('/api/zero',{});

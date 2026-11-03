@@ -800,3 +800,153 @@ def test_remote_outline_follows_rotation_and_needs_an_svg(remote, tmp_path):
     remote.set_file(str(gcode))
     remote.call("/api/zero", {})
     assert remote.call("/api/outline", {"which": "page"})[0] == 409
+
+
+# ---- batches of cards ---------------------------------------------------------------
+
+def _make_card(path, color, w_mm=100, h_mm=60):
+    """A card with one stroke in `color`, 10 mm in from the top-left, 40 x 20 mm."""
+    mm = vp.convert_length("1mm")
+    doc = vp.Document(page_size=(w_mm * mm, h_mm * mm))
+    lc = vp.LineCollection()
+    lc.append([complex(10 * mm, 10 * mm), complex(50 * mm, 10 * mm), complex(50 * mm, 30 * mm)])
+    lc.set_property(vp.METADATA_FIELD_COLOR, vp.Color(color))
+    lc.set_property(vp.METADATA_FIELD_NAME, "ink")
+    doc.add(lc, layer_id=1, with_metadata=True)
+    with open(path, "w") as f:
+        vp.write_svg(f, doc, page_size=doc.page_size)
+    return str(path)
+
+
+@pytest.fixture
+def cards(tmp_path):
+    return _make_card(tmp_path / "red.svg", "#ff0000"), _make_card(tmp_path / "blue.svg", "#0000ff", 80, 60)
+
+
+def test_compose_cards_lays_out_in_rows_and_merges_layers_by_pen(cards):
+    red, blue = cards
+    sheet, pl = pu.compose_cards([red, (blue, 2)], (320, 200), gap_mm=10, margin_mm=10)
+    assert [(p.name, p.x_mm, p.y_mm, p.width_mm, p.height_mm) for p in pl] == [
+        ("red", 10, 10, 100, 60), ("blue #1", 120, 10, 80, 60), ("blue #2", 210, 10, 80, 60)]
+    assert [(s.pen, s.paths) for s in pu.layer_summaries(sheet)] == [("Red", 1), ("Blue", 2)]  # one layer per pen
+    assert pl[0].art_mm == pytest.approx((20, 20, 60, 40), abs=0.01)  # the stroke, placed on the sheet
+    assert tuple(sheet.page_size) == pytest.approx((320 * vp.convert_length("1mm"), 200 * vp.convert_length("1mm")))
+
+
+def test_compose_cards_wraps_rows_and_reports_cards_that_do_not_fit(cards):
+    red, _ = cards
+    sheet, pl = pu.compose_cards([(red, 3)], (230, 200), gap_mm=10, margin_mm=10)
+    assert [(p.x_mm, p.y_mm) for p in pl] == [(10, 10), (120, 10), (10, 80)]  # third card wraps to a new row
+    with pytest.raises(ValueError, match=r"red #5.*does not fit.*after 4 card"):
+        pu.compose_cards([(red, 6)], (230, 200), gap_mm=10, margin_mm=10)
+    with pytest.raises(ValueError):
+        pu.compose_cards([], (230, 200))
+
+
+def test_compose_cards_rotation_and_dict_items(cards):
+    red, blue = cards
+    _, pl = pu.compose_cards([{"file": red, "rotate": 90}, blue], (400, 300), margin_mm=0, gap_mm=0)
+    assert (pl[0].width_mm, pl[0].height_mm) == (60, 100)  # the 100 x 60 card turned portrait
+    assert (pl[1].x_mm, pl[1].width_mm) == (60, 80)
+
+
+def test_cards_outline_and_registration_documents(cards):
+    sheet, pl = pu.compose_cards([cards[0], cards[1]], (320, 200))
+    px = sheet.page_size
+    assert len(pu.cards_outline_document(pl, px, "cards").layers[1]) == 2
+    assert len(pu.cards_outline_document(pl, px, "card_art").layers[1]) == 2
+    assert len(pu.cards_registration_document(pl, px, 3).layers[1]) == 8  # four ticks per card
+    with pytest.raises(ValueError):
+        pu.cards_outline_document(pl, px, "page")
+
+
+@pytest.fixture
+def batch_remote(cards, tmp_path):
+    profile = pu.MachineProfile(bed_size_mm=(320, 200))
+    r = pu.serve_remote(profile, host="127.0.0.1", port=0, save_path=str(tmp_path / "m.json"))
+    r.set_batch([cards[0], (cards[1], 2)])
+
+    def call(path, body=None):
+        req = urllib.request.Request(f"http://127.0.0.1:{r.port}{path}", data=None if body is None else json.dumps(body).encode(),
+                                     headers={"X-Token": r.token})
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    def wait_idle():
+        for _ in range(200):
+            if call("/api/state")[1]["busy"] is None:
+                return
+            time.sleep(0.02)
+        raise AssertionError("job never finished")
+
+    r.call, r.wait_idle = call, wait_idle
+    yield r
+    tmp = r._tmp.name if r._tmp else None
+    r.shutdown()
+    assert tmp is None or not os.path.exists(tmp)  # the composed sheet is cleaned up
+
+
+def test_remote_batch_state_layers_and_preview(batch_remote):
+    r = batch_remote
+    state = r.call("/api/state")[1]
+    assert state["batch"]["cards"] == 3 and "3 cards" in state["file"]
+    assert [(l["pen"], l["paths"]) for l in state["layers"]] == [("Red", 1), ("Blue", 2)]
+    assert state["paper_mm"] == pytest.approx([320, 200], abs=0.1)
+    url = f"http://127.0.0.1:{r.port}/api/file.svg?layer=all"
+    with urllib.request.urlopen(urllib.request.Request(url, headers={"X-Token": r.token})) as resp:
+        assert resp.read().decode().count("<rect") == 3  # a dashed box per card
+    assert r.call("/api/rotate", {"degrees": 90})[0] == 409  # per-card only
+
+
+def test_remote_batch_plots_one_pen_across_all_cards(batch_remote):
+    r = batch_remote
+    r.call("/api/layer", {"layer": r.call("/api/state")[1]["layers"][1]["id"]})  # Blue
+    r.call("/api/zero", {})
+    r.conn.sent.clear()
+    assert r.call("/api/plot", {})[0] == 200
+    r.wait_idle()
+    xs = sorted({round(x) for x, _ in _drawn_points(r)} - {0})
+    assert {130, 170, 220, 260} <= set(xs) and not (set(xs) & {20, 60})  # both blue cards, no red card
+
+
+def test_remote_batch_outlines_and_registration_per_card(batch_remote):
+    r = batch_remote
+    r.call("/api/zero", {})
+    r.conn.sent.clear()
+    assert r.call("/api/outline", {"which": "cards"})[0] == 200
+    r.wait_idle()
+    pts = _drawn_points(r)
+    assert {round(x) for x, _ in pts} >= {10, 110, 120, 200, 210, 290}  # each card's left and right edges
+    assert r.call("/api/state")[1]["message"].startswith("Done: card edge outline")
+
+    r.conn.sent.clear()
+    assert r.call("/api/outline", {"which": "card_art"})[0] == 200
+    r.wait_idle()
+    assert 20 in {round(x) for x, _ in _drawn_points(r)}  # the first card's artwork starts 10 mm into the card
+
+    r.conn.sent.clear()
+    assert r.call("/api/registration", {"tick_mm": 4})[0] == 200
+    r.wait_idle()
+    assert len([l for l in r.conn.sent if l.startswith("G01")]) == 12  # four ticks on each of three cards
+
+
+def test_remote_cards_outline_needs_a_batch_and_set_file_clears_it(batch_remote, cards):
+    r = batch_remote
+    r.set_file(cards[0])
+    assert r.call("/api/state")[1]["batch"] is None
+    r.call("/api/zero", {})
+    assert r.call("/api/outline", {"which": "cards"})[0] == 409
+
+
+def test_remote_set_batch_needs_a_sheet_size(cards):
+    r = pu.serve_remote(pu.MachineProfile(), host="127.0.0.1", port=0)  # no bed size known
+    try:
+        with pytest.raises(ValueError, match="sheet_mm"):
+            r.set_batch([cards[0]])
+        r.set_batch([cards[0]], sheet_mm=(200, 100))  # explicit works
+        assert r.state()["batch"]["cards"] == 1
+    finally:
+        r.shutdown()

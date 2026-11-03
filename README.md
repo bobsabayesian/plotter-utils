@@ -269,6 +269,15 @@ Custom page sizes are `"WIDTHxHEIGHT[unit]"` with no spaces; units `in, cm, mm, 
 | `layer_summaries(doc, pens=None)` / `extract_layer(doc, layer_id)` | Describe a Document's layers (`id`, `name`, `pen`, `hex_color`, `paths`) / get a one-layer copy. The remote page's picker uses these. |
 | `split_layers(svg, output_dir="layerfile", pens=None, group_by_pen=False, rotate=0)` | One SVG per layer (or per pen). Returns `LayerInfo(index, name, pen, hex_color, filename)` list. |
 
+### `plotter_utils.compose`
+
+| Name | Description |
+|---|---|
+| `compose_cards(items, sheet_mm, gap_mm=10, margin_mm=10, rotate=0, pens=None)` | Tiles SVGs on one sheet and merges their layers by pen. `items`: paths, `(path, copies)` pairs, or `{"file", "copies", "rotate"}` dicts. Returns `(Document, [Placement])`; raises `ValueError` naming a card that doesn't fit. |
+| `Placement` | `name`, `x_mm`, `y_mm`, `width_mm`, `height_mm` (the card's page), `art_mm` (its drawn paths' box on the sheet). |
+| `cards_outline_document(placements, sheet_size_px, which)` | One rectangle per card: `"cards"` (page edge) or `"card_art"` (artwork bounds). |
+| `cards_registration_document(placements, sheet_size_px, tick_mm)` | Four corner ticks inside every card. |
+
 ### `plotter_utils.optimize`
 
 | Name | Description |
@@ -359,7 +368,7 @@ The per-layer sequence from `build_layer_job`:
 |---|---|
 | `serve_remote(profile, file=None, connection=None, host="0.0.0.0", port=8000, optimize=True, tick_length="2mm", allow_laser=False, save_path=None)` | Start the tablet page on a background thread; returns a `RemoteControl`. Uses a simulated connection in test mode. |
 | `qr_svg(text)` | A QR code as an SVG string. |
-| `RemoteControl` | `.url()`, `.qr()`, `.select_layer(id_or_"all")`, `.set_tick(mm)`, `.seen()`, `.set_file(path)`, `.stop()` (emergency), `.shutdown()`; its actions mirror the page buttons. |
+| `RemoteControl` | `.url()`, `.qr()`, `.set_batch(items, sheet_mm, ...)`, `.select_layer(id_or_"all")`, `.set_tick(mm)`, `.seen()`, `.set_file(path)`, `.stop()` (emergency), `.shutdown()`; its actions mirror the page buttons. |
 
 ### `plotter_utils.notebook`
 
@@ -536,6 +545,42 @@ Safeguards built in:
 
 `remote.seen()` prints the latest requests that reached the server (time, client IP, browser), which is the quickest way to tell whether a tablet is reaching the machine at all.
 
+### Batches of cards (tiling several SVGs)
+
+To plot many cards in one session, tile them on one sheet (your whiteboard or bed) and let the page
+do the rest:
+
+```python
+remote = pu.serve_remote(profile, save_path="machine.json")
+remote.set_batch(
+    ["thanks.svg", ("birthday.svg", 4), {"file": "invite.svg", "copies": 2, "rotate": 90}],
+    sheet_mm=(841, 594),      # the area to fill; defaults to profile.bed_size_mm
+    gap_mm=10, margin_mm=10,  # space between cards / around the edge
+)
+```
+
+- **Layout.** Cards fill the sheet left to right, then wrap to a new row. A card that doesn't fit is
+  named in the error, with how many were placed before it. The preview shows a dashed box around every
+  card.
+- **Layers merge by pen.** Every card's strokes for a pen become one layer, so the layer picker lists
+  *pens*, not cards, and each pen is loaded once for the whole batch. Optimizing then also orders paths
+  across cards, which cuts travel.
+- **Outline.** The choices become **Each card** (the edge of every card's paper, for marking where each
+  piece goes in dry erase), **Card artwork** (a box around each card's drawn paths) and **Sheet edge**.
+- **Registration marks.** Ticks go on the corners of every card, not the sheet.
+- **Rotation** is set per card (`rotate=` in `set_batch`, or per item); the page's Rotate buttons are
+  off in a batch.
+- `remote.set_file(...)` goes back to a single file. The composed sheet lives in a temporary folder that
+  is removed on `remote.shutdown()`.
+
+Typical session: `set_batch`, set zero at the sheet's top-left, draw **Each card** with the dry-erase
+pen, place the paper in each box, optionally draw the registration marks, then plot each pen's layer.
+
+The same composition works without the page:
+`sheet, placements = pu.compose_cards(items, (841, 594))`, then `pu.write_svg(sheet, "sheet.svg")` and
+the usual `split_layers` / `build_layer_job`. In that route the job's registration marks go on the
+sheet's corners, not on each card.
+
 Other calls: `remote.set_file("other.svg")` to change the file, `remote.url()` to reprint the link,
 `remote.shutdown()` to stop serving. For live use, `profile.test_mode = False` first.
 
@@ -637,6 +682,7 @@ plotter_utils/
   config.py         MachineProfile, DEFAULT_PENS
   drawing.py        paper sizes, registration ticks, SVG helpers, notebook wrappers
   layers.py         SVG layer splitting, pen matching, grouping
+  compose.py        tile several SVGs on one sheet, merge layers by pen, per-card outlines
   optimize.py       vpype path optimization and report
   gcode.py          Document -> G-code, time estimate
   gcode_sender.py   GRBL serial connection and raw G-code tools
